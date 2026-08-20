@@ -1,18 +1,16 @@
-# Development Guide / 개발 가이드
-
-## English
+# Development Guide
 
 The repository is intentionally kept lightweight until the frontend and backend technology ADRs are completed.
 
-### Current foundation
+## Current Foundation
 
-- Bilingual project documentation
+- Separate English and Korean user-facing documentation
 - Architecture documentation
 - GitHub issue-driven development
 - GitHub Actions CI foundation
 - English/Korean i18n requirement from MVP
 
-### Planned application structure
+## Planned Application Structure
 
 ```text
 beluga-manager/
@@ -28,46 +26,27 @@ beluga-manager/
 
 The exact language and framework choices will be recorded in ADRs before implementation.
 
-### Local development
+## Local Development
 
 Until the application stack is selected, repository validation can be run through GitHub Actions. Local development commands will be added together with the selected frontend/backend toolchains.
 
-### Internationalization
+## Internationalization
 
 All user-facing strings must use translation keys. Add both English and Korean translations when introducing a new UI string. API/domain objects must remain locale-neutral.
 
-## 한국어
+## Documentation Convention
 
-Frontend와 Backend 기술 스택에 대한 ADR이 확정될 때까지 저장소는 가볍게 유지합니다.
+User-facing Markdown documentation uses separate language files:
 
-### 현재 기반
+- English: `<name>.md`
+- Korean: `<name>-ko.md`
 
-- 영/한 병기 문서
-- 아키텍처 문서
-- GitHub Issue 중심 개발
-- GitHub Actions CI 기반
-- MVP부터 English/Korean i18n 지원
+Examples:
 
-### 예정 애플리케이션 구조
+- `README.md` / `README-ko.md`
+- `docs/architecture.md` / `docs/architecture-ko.md`
+- `docs/development.md` / `docs/development-ko.md`
 
-```text
-beluga-manager/
-├── apps/
-│   ├── web/          # Frontend
-│   └── api/          # Backend / Domain API
-├── packages/
-│   ├── domain/       # Shared domain contracts
-│   └── adapters/     # OSS integration adapters
-├── docs/
-└── .github/
-```
+English is the canonical filename and Korean uses the `-ko.md` suffix. Both versions must be kept semantically synchronized.
 
-구체적인 언어와 Framework 선택은 구현 전에 ADR로 확정합니다.
-
-### 로컬 개발
-
-Application Stack이 확정되기 전까지 저장소 검증은 GitHub Actions를 통해 수행할 수 있습니다. Frontend/Backend Toolchain이 확정되면 로컬 개발 명령도 함께 추가합니다.
-
-### 다국어
-
-사용자에게 보이는 모든 문자열은 translation key를 사용해야 합니다. 새로운 UI 문자열을 추가할 때 English와 Korean 번역을 함께 추가합니다. API/Domain 객체는 특정 언어에 종속되지 않도록 합니다.
+See the [Korean development guide](development-ko.md) for the Korean version.
