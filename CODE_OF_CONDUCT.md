@@ -1,7 +1,5 @@
 # Code of Conduct
 
-## English
-
 Beluga Manager is committed to a welcoming, respectful, and constructive community.
 
 Participants are expected to:
@@ -14,16 +12,4 @@ Participants are expected to:
 
 Maintainers may moderate discussions and contributions that violate these expectations.
 
-## 한국어
-
-Beluga Manager는 서로 존중하고 건설적으로 협력할 수 있는 커뮤니티를 지향합니다.
-
-참여자는 다음을 준수해야 합니다.
-
-- 서로를 존중하고 전문적으로 소통합니다.
-- 다양한 관점과 경험 수준을 존중합니다.
-- 건설적인 피드백을 주고받습니다.
-- 개인이 아니라 기술적인 문제에 집중합니다.
-- 괴롭힘, 차별, 인신공격 및 부적절한 콘텐츠를 금지합니다.
-
-이 원칙을 위반하는 토론이나 기여에 대해서 Maintainer는 적절한 조치를 취할 수 있습니다.
+See [CODE_OF_CONDUCT-ko.md](CODE_OF_CONDUCT-ko.md) for the Korean version.
