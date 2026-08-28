@@ -4,10 +4,31 @@ English | [한국어](README-ko.md) · [About](docs/about.md)
 
 > **Unified Control Plane for the Beluga Data Platform**
 
-Beluga Manager is the unified entry point and management console for the Beluga Data Platform.
-It integrates APIs from individual open-source components and turns them into a unified domain model, control plane, and user experience.
+Beluga Manager is the planned unified entry point and management console for the Beluga Data Platform. It is designed to integrate APIs from individual open-source components and turn them into a unified domain model, control plane, and user experience.
 
-Beluga Manager is **not an OSS collection portal**. Kafka, Flink, Iceberg, Trino, Airflow, and other components remain authoritative for their own resources. Beluga Manager adds value by correlating those APIs into platform-level concepts such as **Pipelines, Data Assets, Services, and Operations**.
+Beluga Manager is **not an OSS collection portal**. Kafka, Flink, Iceberg, Trino, Airflow, and other components remain authoritative for their own resources. Manager adds value by correlating those APIs into platform-level concepts such as **Pipelines, Data Assets, Services, and Operations**.
+
+## Current Status
+
+🚧 **Architecture/Foundation stage — not yet a runnable product.**
+
+As of 2026-08-28, this repository contains the project foundation, CI, contribution/security policy, architecture, and development documentation. A repository-wide search does not yet show a runnable application/package or implemented `/api/v1/...` service surface.
+
+That distinction is intentional: the domain/API descriptions below are the **target contract**, not evidence that those endpoints already exist.
+
+The next meaningful milestone is a read-first vertical slice that can be started locally and proves one path end to end:
+
+```text
+Beluga service discovery
+        ↓
+Unified Service API
+        ↓
+Kafka → Flink → Iceberg → Trino correlation
+        ↓
+Pipeline view / API response
+```
+
+Until that exists, the first-success criterion for this repository is documentation/architecture consistency and CI validation, not product adoption.
 
 ## Why Beluga Manager?
 
@@ -41,11 +62,15 @@ The product therefore focuses on **integration and context**, not reimplementing
 The architecture follows four rules:
 
 1. **Use authoritative upstream APIs.** Each OSS remains the source of truth for its resources.
-2. **Expose Beluga domains, not upstream models.** Frontends consume Beluga APIs such as `/services`, `/pipelines`, and `/data-assets` rather than calling OSS APIs directly.
-3. **Correlate instead of duplicate.** Beluga discovers relationships across services and stores only the minimum cache/index state needed for performance and navigation.
+2. **Expose Beluga domains, not upstream models.** Frontends should consume stable Beluga APIs rather than calling OSS APIs directly.
+3. **Correlate instead of duplicate.** Beluga should store only the minimum cache/index state needed for performance and navigation.
 4. **Preserve upstream context.** Specialized operations can still open the original OSS UI/API without losing the Beluga context.
 
-## Core Domains
+See [Architecture](docs/architecture.md) for the concise architectural contract.
+
+## Core Domains — Target Model
+
+The domains below are design targets. They become implemented capabilities only when corresponding code/tests exist on `main`.
 
 ### Pipeline
 
@@ -63,38 +88,19 @@ Iceberg Table
 Trino / Query
 ```
 
-The Pipeline domain correlates resources across Kafka, Flink, Iceberg, Trino, and orchestration systems into one operational view.
-
 ### Data Asset
 
 A Data Asset provides a unified view of catalog and query metadata such as catalog, schema, table, columns, partitions, location, and query context.
 
-Iceberg remains authoritative for lakehouse metadata while Trino contributes query/catalog context.
-
 ### Service
 
-Services are represented as platform capabilities rather than just an installation list.
-
-Examples include:
-
-- Streaming
-- Processing
-- Lakehouse
-- Query
-- Orchestration
-- BI
-- Storage
-- Observability
-
-The Service domain exposes identity, version, health, dependencies, and capabilities.
+Services are represented as platform capabilities rather than just an installation list: Streaming, Processing, Lakehouse, Query, Orchestration, BI, Storage, and Observability.
 
 ### Operations
 
-Operations brings together resources, events, health, logs, and dependencies so a failure can be investigated from one platform context.
+Operations is intended to bring together resources, events, health, logs, and dependencies so a failure can be investigated from one platform context.
 
-## Integration Model
-
-Each integration is isolated behind an adapter/capability boundary so that OSS API versions and implementation differences do not leak into the Beluga Domain API.
+## Integration Model — Target Boundary
 
 ```text
 OSS API
@@ -110,28 +116,25 @@ Unified API
 Manager UI
 ```
 
-Beluga distinguishes between:
+The design distinguishes between:
 
 - **authoritative state** from the upstream OSS
 - **short-lived cache** for performance
 - **correlation indexes** for cross-service discovery
 - **Beluga-owned metadata** such as explicit mappings
 
-Uncertain relationships are not presented as authoritative facts.
+Uncertain relationships must not be presented as authoritative facts.
 
 ## Internationalization
 
-Beluga Manager supports internationalization from the beginning.
+The architecture requires internationalization from the beginning:
 
 - `en-US` — English
 - `ko-KR` — Korean
-- Browser locale detection
-- Manual language selection
-- Persistent locale preference
-- Locale-neutral APIs
-- Localized date, time, and number formatting
+- locale-neutral APIs
+- resource names/identifiers are never translated
 
-Actual platform resource names such as Kafka Topics, tables, jobs, namespaces, and identifiers are never translated.
+Browser detection, language selection, preference persistence, and localized formatting remain product requirements until implemented and tested.
 
 ## Initial MVP
 
@@ -141,7 +144,7 @@ The first vertical slice is intentionally small:
 Kafka → Flink → Iceberg → Trino
 ```
 
-### MVP scope
+### MVP target scope
 
 - Unified Service API
 - Service discovery
@@ -163,9 +166,9 @@ Kafka → Flink → Iceberg → Trino
 
 The MVP is **read-first**: prove the unified experience before adding potentially destructive management actions.
 
-## API Direction
+## API Direction — Planned Contract
 
-The first Beluga API surface is designed around stable domain concepts rather than OSS-specific models:
+The planned API surface is:
 
 ```text
 GET /api/v1/services
@@ -177,34 +180,32 @@ GET /api/v1/health
 GET /api/v1/events
 ```
 
-The frontend should be able to implement the MVP without directly calling Kafka, Flink, Iceberg, Trino, or Airflow APIs.
+These paths are design targets today, not implemented endpoint claims.
 
-## Current Status
+## First Verified Success — Next Milestone
 
-🚧 **Early development**
+When implementation begins, the first runnable success should prove all of the following from a clean checkout:
 
-The repository is establishing the foundation and architecture before implementation. The planned order is:
+1. start the Manager locally with one documented command;
+2. connect to a known Beluga environment or deterministic fixture;
+3. return at least one real Service through the unified API;
+4. correlate one Kafka → Flink → Iceberg → Trino pipeline without inventing authoritative relationships;
+5. expose a health/degraded state when one upstream dependency is unavailable.
 
-```text
-API Contract
-   ↓
-Unified Service API
-   ↓
-Discovery / Correlation
-   ↓
-Kafka → Flink → Iceberg → Trino Vertical Slice
-   ↓
-Data Asset / Query / Operations
-```
+The README should be updated with exact commands only after this path exists and is verified in CI or an integration environment.
 
 ## Documentation
 
-- [About OpenForge-style project context](docs/about.md)
+- [About](docs/about.md)
 - [Architecture](docs/architecture.md)
 - [Development Guide](docs/development.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 - [Korean documentation](README-ko.md)
+
+## Contributing / Feedback
+
+At the current stage, the highest-value contributions are API/domain review, correlation-boundary feedback, and implementation proposals that preserve upstream authority. Do not add UI-only mock behavior that implies an upstream capability exists when it does not.
 
 ## License
 
