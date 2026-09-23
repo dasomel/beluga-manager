@@ -145,7 +145,7 @@ are **not** a `kind` — they appear only inside a `TableDetail` payload (D3).
   `healthStatus`); if a future need for independently health-tracked columns appears, add
   `kind: "column"` later without breaking existing consumers of the enum.
 
-### D2 — Add `parentId` and `path` to `DataAsset`, both optional/nullable
+### D2 — Add `parentId` and `path` to `DataAsset`, both required (`parentId` nullable)
 
 ```ts
 export const dataAssetKindSchema = z
@@ -189,7 +189,17 @@ GET /api/v1/data-assets/{id}                  # single asset, kind-specific deta
 ```
 
 `status` and pagination (`page`/`pageSize`) filters keep working unchanged, orthogonal to `parentId`
-(e.g. `?parentId=<schemaId>&status=degraded&pageSize=50`).
+(e.g. `?parentId=<schemaId>&status=degraded&pageSize=50`), because the new query schema only adds a
+field via `.extend`, mirroring how `statusFilterableListQuerySchema` itself extends
+`paginationQuerySchema` in `packages/domain-api/src/schema/query.ts`:
+
+```ts
+export const dataAssetListQuerySchema = statusFilterableListQuerySchema.extend({
+  // 생략/undefined -> 최상위 catalog들. 자식 목록을 조회할 부모 asset의 id를 그대로 넣는다(D4의
+  // 파생 id를 그대로 재사용 — 별도 lookup 없음).
+  parentId: z.string().min(1).optional(),
+});
+```
 
 - **Reason**: one recursive shape for the whole tree; the navigator's click-to-expand maps directly
   onto one `parentId` call per expansion; reuses `statusFilterableListQuerySchema` and
@@ -201,23 +211,40 @@ GET /api/v1/data-assets/{id}                  # single asset, kind-specific deta
   (e.g. global search), add `?flat=true` as an explicit, named escape rather than overloading the
   default.
 
-### D4 — Derived, prefixed identifiers; no new persisted mapping
+### D4 — Derived, prefixed identifiers, percent-encoded per segment; no new persisted mapping
 
 `id` stays an opaque string but follows a deterministic, kind-prefixed convention derived from the
-qualified name, not a stored UUID:
+qualified name, not a stored UUID. **Default encoding**: each path segment (namespace segment, table
+name, or topic name) is percent-encoded independently — `%` → `%25` first, then `.` → `%2E` — before
+being joined with a literal `.` separator. Because an encoded segment can never itself contain a
+literal `.`, every `.` in the joined id is unambiguously a segment boundary, and the encoding is
+reversible (split the id on `.`, then percent-decode each part). Without this, a naive dot-join
+contradicts D8: `path: string[]` can represent both a two-segment namespace and a single segment that
+happens to contain a dot, and dot-joining them without escaping collapses both to the same string.
 
 | Kind | Convention | Example |
 |---|---|---|
 | catalog | `asset-catalog-<catalog>` | `asset-catalog-iceberg` |
-| schema | `asset-schema-<catalog>.<namespace-path-dot-joined>` | `asset-schema-iceberg.analytics` |
-| table | `asset-table-<catalog>.<namespace-path>.<table>` | `asset-table-iceberg.analytics.orders` |
-| topic | `asset-topic-<kafka-cluster>.<topic>` | `asset-topic-kafka.events-raw` |
+| schema | `asset-schema-<catalog>.<percent-encoded namespace segments, dot-joined>` | `asset-schema-iceberg.analytics` |
+| table | `asset-table-<catalog>.<percent-encoded namespace segments, dot-joined>.<percent-encoded table name>` | `asset-table-iceberg.analytics.orders` |
+| topic | `asset-topic-<kafka-cluster>.<percent-encoded topic name>` | `asset-topic-kafka.events-raw` |
+
+Examples that motivate the encoding:
+
+- Nested namespace `["a", "b"]` (two segments) → `asset-schema-iceberg.a.b`.
+- A single namespace segment literally named `"a.b"` → `asset-schema-iceberg.a%2Eb` — encoded, so it
+  never collides with the two-segment case above even though a naive dot-join would produce `"a.b"`
+  for both.
+- A table named `"orders.v2"` under namespace `["analytics"]` → `asset-table-iceberg.analytics.orders%2Ev2`.
 
 - **Reason**: derivable from upstream identity with no lookup table — consistent with "no second
   metadata store" (driver 2); collision-safe across services because the prefix encodes both kind and
-  owning service/catalog.
-- **Cost**: id length grows with namespace depth; must be validated against a reasonable max (e.g.
-  256 chars) at the adapter boundary, not left unbounded.
+  owning service/catalog; per-segment percent-encoding removes the `.`-join ambiguity between a nested
+  namespace and a single segment containing a literal dot that D8's `path: string[]` shape otherwise
+  allows upstream to produce.
+- **Cost**: id length grows with namespace depth and with encoding overhead on names containing `.`/`%`;
+  must be validated against a reasonable max (e.g. 256 chars) at the adapter boundary, not left
+  unbounded.
 - **Escape hatch**: if derived ids ever collide or become unwieldy (very deep nesting, unusual
   characters), switch to a content hash (`sha1` of the qualified name) while keeping the
   human-readable form in `path`/`name` — an internal id representation change, invisible to API
@@ -248,7 +275,9 @@ or a parallel hierarchy resource (Option C).
   instead of the upstream layer.
 - **Cost**: `routes-data-assets.test.ts` and the OpenAPI snapshot test change in the same PR that ships
   this; anyone who had started integrating against the current flat shape must be told explicitly
-  (there is no deprecation window because there is no `/api/v2` to deprecate into).
+  (there is no deprecation window because there is no `/api/v2` to deprecate into). This includes
+  `name`'s meaning changing from fully-qualified to leaf-only (see Consequences) — a behavior change,
+  not just an additive one, accepted here for the same reason (no live consumer).
 - **Escape hatch**: if a real external consumer appears before this ships, version at that point
   (`/api/v2/data-assets`) per the API-versioning principle ADR-0002 already lists as owed.
 
@@ -275,7 +304,9 @@ grants, so a future authorization pass has an existing level to attach to instea
   AGENTS.md's "uncertain/inferred relationships must not be presented as facts" — silently returning
   an unfiltered tree would misrepresent access control as enforced when it is not. This is one of the
   open questions below, not a decision this ADR can make unilaterally (D7 records the *shape*; the
-  *go/no-go gate* is Open Question 3).
+  *go/no-go gate* is Open Question 3). The same gate covers `childCount` (D9): a count is itself
+  existence/cardinality information about children the caller may not be authorized to see, so until
+  node-level OPA filtering exists, `childCount` must be `null`, never a raw unfiltered number.
 
 ### D8 — `path` is an ordered array of segments, not a dotted string
 
@@ -307,8 +338,19 @@ export const dataAssetColumnSchema = z
   .openapi("DataAssetColumn");
 
 export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
-  dataAssetSchema.extend({ kind: z.literal("catalog"), childCount: z.number().int().nonnegative() }),
-  dataAssetSchema.extend({ kind: z.literal("schema"), childCount: z.number().int().nonnegative() }),
+  dataAssetSchema.extend({
+    kind: z.literal("catalog"),
+    // beluga/policies grant로 필터링된 이후의 인가된 자식 수(D7). node-level OPA 필터링이
+    // 아직 없는 interim 기간에는 D7의 escape hatch에 따라 항상 null이다 — 필터링되지
+    // 않은 원본 카운트를 노출하면 access control이 실제로는 강제되지 않은 것을 강제된
+    // 것처럼 왜곡한다.
+    childCount: z.number().int().nonnegative().nullable(),
+  }),
+  dataAssetSchema.extend({
+    kind: z.literal("schema"),
+    // catalog와 동일한 규칙 — 위 주석 참조.
+    childCount: z.number().int().nonnegative().nullable(),
+  }),
   dataAssetSchema.extend({
     kind: z.literal("table"),
     format: z.string().min(1).openapi({ example: "ICEBERG_V2" }),
@@ -333,6 +375,10 @@ export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
   each kind carry only the fields that make sense for it instead of an all-optional grab-bag.
 - **Cost**: one more route/schema pair; `@hono/zod-openapi` must render a discriminated union cleanly
   in the OpenAPI document (verify in Phase 1 against the existing `openapi-document.test.ts` pattern).
+  `childCount` on the `catalog`/`schema` members is authorization-sensitive (D7): it must be computed
+  from the same authorized child set a subsequent `?parentId=` call would return, never from an
+  unfiltered upstream count, or it leaks the existence/cardinality of children the caller cannot see.
+  Until OPA node filtering exists (D7's interim gate), `childCount` is `null` rather than a real number.
 - **Escape hatch**: if the union becomes unwieldy, fall back to one shared shape with kind-specific
   fields all `.optional()` — strictly worse typing, kept only as a documented fallback.
 
@@ -363,7 +409,11 @@ export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
   `?parentId=` for an unknown id (empty list, not 404 — a parent existing is not guaranteed by this
   endpoint's contract), `GET /api/v1/data-assets/{id}` for each kind (200 with the right union member)
   and for an unknown id (404 `ErrorResponse`). Extend `openapi-document.test.ts` to cover the new
-  route/schemas/discriminated union rendering.
+  route/schemas/discriminated union rendering. Add id-derivation unit tests for D4's percent-encoding:
+  round-trip (encode then decode a name containing `.` and one containing `%` recovers the original),
+  and the collision case (nested namespace `["a", "b"]` vs a single segment literally named `"a.b"`
+  must derive to different ids). Add a `childCount` test asserting the Phase 1 stub returns `null`
+  (D7/D9's interim, pre-OPA-filtering posture), not an unfiltered number.
 
 **Phase 2 — Frontend integration.**
 
@@ -393,6 +443,12 @@ rollout to a real (non-developer) user until resolved.
   are added.
 - `DataCatalogView.tsx`'s mock-data comment is updated to point at this ADR (done alongside this ADR;
   see the one-line diff in the same commit) — the code itself stays on mock data until Phase 2 ships.
+- `dataAssetSchema.name`'s semantics change from fully-qualified (today's implementation, e.g.
+  `analytics.orders` per `packages/domain-api/src/schema/dataAsset.ts:9`) to leaf-only (this ADR's D2
+  example, `orders`; the qualified form is reconstructed from `path` + `name`, D8). This is a behavior
+  change to an existing field, not merely an additive one — low real risk per D6 (no live consumer to
+  break); the escape hatch is D6's: if a real consumer of the current fully-qualified `name` appears
+  before this ships, version (`/api/v2`) instead of changing the field's meaning in place.
 - No new persisted store; the hierarchy remains fully derived, consistent with the standing "no second
   metadata store" principle.
 - Authorization enforcement for hierarchy nodes (D7) is explicitly **not** solved by this ADR — it is
@@ -413,8 +469,10 @@ rollout to a real (non-developer) user until resolved.
 3. **Authorization go/no-go gate (D7)**: is it acceptable to ship Phases 1–3 to real users with
    hierarchy nodes **unfiltered** (every catalog/schema/table visible regardless of `beluga/policies`
    grants) as long as responses are marked with an explicit unauthorized/unfiltered warning, or must
-   OPA-backed node filtering land before any real-user rollout? This is a security/product decision,
-   not something this ADR can default.
+   OPA-backed node filtering land before any real-user rollout? The same answer governs `childCount`
+   (D9): whether it may ever be a real, unfiltered number before Phase 4, or must stay `null` until
+   node-level OPA filtering lands. This is a security/product decision, not something this ADR can
+   default.
 4. **Expected fan-out**: D5 assumes page/pageSize pagination is adequate because per-node fan-out
    (schemas per catalog, tables per schema) is expected to stay in the tens/low-hundreds on this
    platform. Is that assumption correct for the catalogs actually planned, or should cursor pagination

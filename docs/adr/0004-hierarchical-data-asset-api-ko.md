@@ -143,7 +143,7 @@ parent/child 목록과, table/column detail을 위한 새로운 single-resource 
   append-only다. 독립적으로 health를 추적하는 column에 대한 필요가 미래에 생기면 기존 enum
   consumer를 깨지 않고 나중에 `kind: "column"`을 추가할 수 있다.
 
-### D2 — `DataAsset`에 `parentId`와 `path` 추가, 둘 다 optional/nullable
+### D2 — `DataAsset`에 `parentId`와 `path` 추가, 둘 다 필수(`parentId`는 nullable)
 
 ```ts
 export const dataAssetKindSchema = z
@@ -187,7 +187,17 @@ GET /api/v1/data-assets/{id}                  # 단일 asset, kind별 detail(아
 ```
 
 `status`와 pagination(`page`/`pageSize`) 필터는 `parentId`와 직교하여 변경 없이 계속 동작한다(예:
-`?parentId=<schemaId>&status=degraded&pageSize=50`).
+`?parentId=<schemaId>&status=degraded&pageSize=50`). 새 query 스키마는 `.extend`로 필드 하나만
+추가하기 때문이다 — `packages/domain-api/src/schema/query.ts`에서 `statusFilterableListQuerySchema`
+자체가 `paginationQuerySchema`를 확장하는 방식과 동일하다:
+
+```ts
+export const dataAssetListQuerySchema = statusFilterableListQuerySchema.extend({
+  // 생략/undefined -> 최상위 catalog들. 자식 목록을 조회할 부모 asset의 id를 그대로 넣는다(D4의
+  // 파생 id를 그대로 재사용 — 별도 lookup 없음).
+  parentId: z.string().min(1).optional(),
+});
+```
 
 - **이유**: 전체 tree를 위한 하나의 재귀적 모양; navigator의 click-to-expand가 확장마다 하나의
   `parentId` 호출로 직접 대응한다; `statusFilterableListQuerySchema`와
@@ -198,23 +208,36 @@ GET /api/v1/data-assets/{id}                  # 단일 asset, kind별 detail(아
 - **escape hatch**: "레벨 상관없이 모든 asset을 달라"는 진짜 use case(예: 전역 검색)가 나중에
   나타나면, 기본값을 덮어쓰지 말고 명시적으로 이름 붙인 `?flat=true`를 추가한다.
 
-### D4 — 파생되고 접두사가 붙은 식별자; 새로운 영속 매핑 없음
+### D4 — 파생되고 접두사가 붙은 식별자, segment별 percent-encoding; 새로운 영속 매핑 없음
 
 `id`는 여전히 opaque 문자열이지만 저장된 UUID가 아니라 qualified name으로부터 결정적으로 파생되는,
-kind가 접두사로 붙은 관례를 따른다:
+kind가 접두사로 붙은 관례를 따른다. **기본 encoding**: 각 path segment(namespace segment, table
+이름, topic 이름)는 join 전에 독립적으로 percent-encode된다 — 먼저 `%` → `%25`, 그다음 `.` → `%2E`.
+인코딩된 segment는 절대 literal `.`을 포함할 수 없으므로, join된 id 안의 모든 `.`은 명확하게 segment
+경계이며, encoding은 되돌릴 수 있다(id를 `.`으로 split한 뒤 각 부분을 percent-decode). 이 규칙이
+없으면 D8과 충돌한다: `path: string[]`는 두 세그먼트짜리 namespace와, 우연히 dot을 포함한 단일
+segment를 둘 다 표현할 수 있는데, escaping 없이 dot-join하면 둘이 같은 문자열로 붕괴한다.
 
 | Kind | 관례 | 예 |
 |---|---|---|
 | catalog | `asset-catalog-<catalog>` | `asset-catalog-iceberg` |
-| schema | `asset-schema-<catalog>.<namespace-path-dot-joined>` | `asset-schema-iceberg.analytics` |
-| table | `asset-table-<catalog>.<namespace-path>.<table>` | `asset-table-iceberg.analytics.orders` |
-| topic | `asset-topic-<kafka-cluster>.<topic>` | `asset-topic-kafka.events-raw` |
+| schema | `asset-schema-<catalog>.<percent-encode된 namespace segment들, dot-join>` | `asset-schema-iceberg.analytics` |
+| table | `asset-table-<catalog>.<percent-encode된 namespace segment들, dot-join>.<percent-encode된 table 이름>` | `asset-table-iceberg.analytics.orders` |
+| topic | `asset-topic-<kafka-cluster>.<percent-encode된 topic 이름>` | `asset-topic-kafka.events-raw` |
+
+encoding이 필요한 이유를 보여주는 예:
+
+- Nested namespace `["a", "b"]`(두 segment) → `asset-schema-iceberg.a.b`.
+- literal하게 `"a.b"`라는 이름의 단일 namespace segment → `asset-schema-iceberg.a%2Eb` — encoding된
+  덕분에, naive하게 dot-join하면 둘 다 `"a.b"`가 되는 위의 두-segment 경우와 절대 충돌하지 않는다.
+- namespace `["analytics"]` 아래 `"orders.v2"`라는 이름의 table → `asset-table-iceberg.analytics.orders%2Ev2`.
 
 - **이유**: 별도의 lookup table 없이 upstream identity로부터 파생 가능 — "second metadata store
   없음"(driver 2)과 일치한다. 접두사가 kind와 소유 서비스/catalog를 모두 인코딩하므로 서비스 간에
-  충돌하지 않는다.
-- **비용**: namespace 깊이에 따라 id 길이가 늘어난다. adapter boundary에서 무제한으로 두지 않고
-  합리적인 최대치(예: 256자)로 검증해야 한다.
+  충돌하지 않는다. segment별 percent-encoding은 D8의 `path: string[]` 모양이 upstream에서 만들어낼
+  수 있는, nested namespace와 literal dot을 포함한 단일 segment 사이의 `.`-join 모호성을 제거한다.
+- **비용**: namespace 깊이와 `.`/`%`를 포함한 이름의 encoding overhead에 따라 id 길이가 늘어난다.
+  adapter boundary에서 무제한으로 두지 않고 합리적인 최대치(예: 256자)로 검증해야 한다.
 - **escape hatch**: 파생 id가 충돌하거나 다루기 어려워지면(매우 깊은 nesting, 특이한 문자),
   qualified name의 content hash(`sha1`)로 전환하고 사람이 읽을 수 있는 형태는 `path`/`name`에
   유지한다 — `id`가 이미 opaque로 문서화되어 있으므로 API consumer에게는 보이지 않는 내부 표현
@@ -245,7 +268,9 @@ Children 목록(`?parentId=`)은 다른 모든 목록 엔드포인트와 동일�
   셈이다.
 - **비용**: 이 기능을 배포하는 같은 PR에서 `routes-data-assets.test.ts`와 OpenAPI snapshot 테스트가
   바뀐다. 현재 flat 모양에 대해 통합을 시작했던 누구든 명시적으로 통지받아야 한다(deprecate할
-  `/api/v2`가 없으므로 deprecation window가 없다).
+  `/api/v2`가 없으므로 deprecation window가 없다). 여기에는 `name`의 의미가 fully-qualified에서
+  leaf-only로 바뀌는 것도 포함된다(Consequences 참조) — 단순 additive가 아니라 behavior change지만,
+  같은 이유(live consumer 없음)로 여기서 받아들인다.
 - **escape hatch**: 이 기능이 배포되기 전에 실제 외부 consumer가 나타나면, ADR-0002가 이미 부채로
   나열한 API-versioning 원칙에 따라 그 시점에 버전을 올린다(`/api/v2/data-assets`).
 
@@ -272,7 +297,10 @@ authorization 단계가 새 레벨을 발명하지 않고 기존 레벨에 붙�
   unauthorized/unfiltered로 명시적으로 표시해야 한다. AGENTS.md의 "불확실/추론된 관계를 사실처럼
   제시하지 않는다"에 따라, 필터링되지 않은 tree를 조용히 반환하는 것은 강제되지 않은 access
   control을 강제된 것처럼 왜곡하는 일이다. 이는 이 ADR이 단독으로 결정할 수 없는, 아래 Open
-  Question 3이다(D7은 *모양*을 기록하고, *go/no-go gate*는 Open Question 3이다).
+  Question 3이다(D7은 *모양*을 기록하고, *go/no-go gate*는 Open Question 3이다). 같은 gate가
+  `childCount`(D9)에도 적용된다: count 자체가 caller가 볼 권한이 없는 자식에 대한 existence/
+  cardinality 정보이므로, node-level OPA 필터링이 존재하기 전까지 `childCount`는 반드시 `null`이며
+  절대 필터링되지 않은 원본 숫자가 될 수 없다.
 
 ### D8 — `path`는 dotted 문자열이 아니라 정렬된 segment 배열이다
 
@@ -304,8 +332,19 @@ export const dataAssetColumnSchema = z
   .openapi("DataAssetColumn");
 
 export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
-  dataAssetSchema.extend({ kind: z.literal("catalog"), childCount: z.number().int().nonnegative() }),
-  dataAssetSchema.extend({ kind: z.literal("schema"), childCount: z.number().int().nonnegative() }),
+  dataAssetSchema.extend({
+    kind: z.literal("catalog"),
+    // beluga/policies grant로 필터링된 이후의 인가된 자식 수(D7). node-level OPA 필터링이
+    // 아직 없는 interim 기간에는 D7의 escape hatch에 따라 항상 null이다 — 필터링되지
+    // 않은 원본 카운트를 노출하면 access control이 실제로는 강제되지 않은 것을 강제된
+    // 것처럼 왜곡한다.
+    childCount: z.number().int().nonnegative().nullable(),
+  }),
+  dataAssetSchema.extend({
+    kind: z.literal("schema"),
+    // catalog와 동일한 규칙 — 위 주석 참조.
+    childCount: z.number().int().nonnegative().nullable(),
+  }),
   dataAssetSchema.extend({
     kind: z.literal("table"),
     format: z.string().min(1).openapi({ example: "ICEBERG_V2" }),
@@ -330,6 +369,10 @@ format badge, location, snapshot count)이 만들어지는 원천이다.
   grab-bag 대신 각 kind가 자신에게 의미 있는 필드만 가지게 한다.
 - **비용**: route/schema 쌍이 하나 더 늘어난다. `@hono/zod-openapi`가 discriminated union을 OpenAPI
   문서에 깨끗하게 렌더링해야 한다(Phase 1에서 기존 `openapi-document.test.ts` 패턴으로 검증).
+  `catalog`/`schema` 멤버의 `childCount`는 authorization에 민감하다(D7): 이후의 `?parentId=` 호출이
+  반환할 것과 같은 인가된 자식 집합으로부터 계산되어야 하며, 절대 필터링되지 않은 upstream count에서
+  계산되어서는 안 된다 — 그렇지 않으면 caller가 볼 수 없는 자식의 existence/cardinality를 노출한다.
+  OPA node 필터링이 존재하기 전까지(D7의 interim gate) `childCount`는 실제 숫자가 아니라 `null`이다.
 - **escape hatch**: union이 다루기 어려워지면, 모든 kind별 필드를 `.optional()`로 둔 하나의 공유
   모양으로 후퇴한다 — 타이핑 면에서 명백히 더 나쁘며, 문서화된 fallback으로만 유지한다.
 
@@ -360,7 +403,11 @@ format badge, location, snapshot count)이 만들어지는 원천이다.
   `?parentId=`(빈 목록, 404 아님 — 이 엔드포인트의 계약은 부모의 존재를 보장하지 않는다), 각 kind에
   대한 `GET /api/v1/data-assets/{id}`(맞는 union 멤버로 200)와 알 수 없는 id(404 `ErrorResponse`)
   케이스를 추가한다. 새 route/스키마/discriminated union 렌더링을 다루도록
-  `openapi-document.test.ts`를 확장한다.
+  `openapi-document.test.ts`를 확장한다. D4의 percent-encoding에 대한 id 파생 단위 테스트를
+  추가한다: round-trip(`.`을 포함한 이름과 `%`를 포함한 이름을 각각 encode한 뒤 decode하면 원본이
+  복원된다)과 collision 케이스(nested namespace `["a", "b"]`와 literal하게 `"a.b"`인 단일 segment는
+  서로 다른 id로 파생되어야 한다). `childCount`가 Phase 1 stub에서 `null`을 반환하는지(D7/D9의
+  interim, OPA 필터링 이전 posture) — 필터링되지 않은 숫자가 아님을 — 검증하는 테스트를 추가한다.
 
 **Phase 2 — Frontend 통합.**
 
@@ -391,6 +438,12 @@ ADR이 adapter가 만족해야 하는 id/path 파생 계약(D2/D4) 이상은 범
   route가 추가된다.
 - `DataCatalogView.tsx`의 mock-data 주석은 이 ADR을 가리키도록 업데이트된다(이 ADR과 같은 커밋에서
   함께 수행 — 한 줄짜리 diff). 코드 자체는 Phase 2가 배포될 때까지 mock 데이터에 남는다.
+- `dataAssetSchema.name`의 의미가 fully-qualified(오늘의 구현, 예:
+  `packages/domain-api/src/schema/dataAsset.ts:9`의 `analytics.orders`)에서 leaf-only(이 ADR의 D2
+  예시 `orders`; qualified 형태는 `path` + `name`으로 재구성한다, D8)로 바뀐다. 이는 단순 additive가
+  아니라 기존 필드에 대한 behavior change다 — D6과 마찬가지로 live consumer가 없어 실질 위험은
+  낮다. escape hatch도 D6과 같다: 배포 전에 현재의 fully-qualified `name`에 실제로 통합을 시작한
+  consumer가 나타나면, 필드 의미를 그 자리에서 바꾸는 대신 버전을 올린다(`/api/v2`).
 - 새로운 영속 저장소는 없다. hierarchy는 "second metadata store 없음"이라는 기존 원칙과 일치하게
   완전히 파생된 상태로 유지된다.
 - hierarchy 노드에 대한 authorization 강제(D7)는 이 ADR이 해결하지 않는다 — 실제 사용자 rollout의
@@ -410,8 +463,9 @@ ADR이 adapter가 만족해야 하는 id/path 파생 계약(D2/D4) 이상은 범
 3. **Authorization go/no-go gate(D7)**: `beluga/policies` grant와 무관하게 모든 catalog/schema/
    table이 보이는 **필터링되지 않은** hierarchy 노드를, 응답이 명시적인 unauthorized/unfiltered
    경고로 표시되는 한 실제 사용자에게 Phase 1–3을 배포해도 괜찮은가, 아니면 실제 사용자 rollout
-   전에 OPA 기반 노드 필터링이 먼저 도착해야 하는가? 이는 보안/제품 결정이며 이 ADR이 기본값을
-   정할 수 없다.
+   전에 OPA 기반 노드 필터링이 먼저 도착해야 하는가? `childCount`(D9)가 Phase 4 이전에 실제
+   필터링되지 않은 숫자가 될 수 있는지, 아니면 node-level OPA 필터링이 도착하기 전까지 `null`로
+   남아야 하는지도 같은 답으로 결정된다. 이는 보안/제품 결정이며 이 ADR이 기본값을 정할 수 없다.
 4. **예상 fan-out**: D5는 노드당 fan-out(catalog당 schema, schema당 table)이 이 플랫폼에서 수십/낮은
    수백 수준일 것으로 예상되므로 page/pageSize pagination이 충분하다고 가정한다. 실제로 계획된
    catalog들에 그 가정이 맞는가, 아니면 D5의 escape hatch로 미루지 않고 Phase 1부터 cursor
