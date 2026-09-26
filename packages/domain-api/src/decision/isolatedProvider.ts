@@ -9,6 +9,7 @@ import type { DecisionContext, DecisionProvider, DecisionResult, TelemetrySnapsh
 export const ISOLATION_TIMEOUT = "ISOLATION_TIMEOUT";
 export const ISOLATION_PROVIDER_ERROR = "ISOLATION_PROVIDER_ERROR";
 export const ISOLATION_INVALID_SHAPE = "ISOLATION_INVALID_SHAPE";
+export const ISOLATION_OVERLOADED = "ISOLATION_OVERLOADED";
 
 // D1: 기본 budget 값.
 // reason: 이슈 #69 코멘트의 Gemini 기술조사에서 확인된 Jev(System-1 후보) 지연이 70~500ms —
@@ -18,6 +19,7 @@ export const ISOLATION_INVALID_SHAPE = "ISOLATION_INVALID_SHAPE";
 // escape hatch: 호출부가 provider별로 budgetMs를 넘겨 재정의한다. 골든 인시던트 데이터셋에서
 //         실측 latency SLO가 나오면 이 기본값을 재검토한다.
 const DEFAULT_BUDGET_MS = 500;
+const DEFAULT_MAX_CONCURRENT = 32;
 
 // 이 boundary 자신이 반환하는 ABSTAIN 결과의 policyVersion. 내부 provider가 실패했기 때문에
 // provider 자신의 policyVersion을 알 수 없다 — boundary가 스스로 부여하는 고정값이다.
@@ -26,7 +28,13 @@ const ISOLATION_POLICY_VERSION = "isolation-boundary/v1";
 export type IsolatedProviderOptions = {
   /** provider.decide()에 허용하는 최대 시간(ms). 기본값은 DEFAULT_BUDGET_MS. */
   budgetMs?: number;
+  /** 실행 중 provider 호출 상한. 완료되지 않은 호출은 timeout 뒤에도 슬롯을 점유한다. */
+  maxConcurrent?: number;
 };
+
+function safeIdentity(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+}
 
 function isolationAbstain(
   provider: DecisionProvider,
@@ -40,8 +48,8 @@ function isolationAbstain(
     abstained: true,
     abstainReason: reason,
     evidenceRefs: [],
-    provider: provider.id,
-    providerVersion: provider.version,
+    provider: safeIdentity(provider.id, "unknown-provider"),
+    providerVersion: safeIdentity(provider.version, "unknown-version"),
     policyVersion: ISOLATION_POLICY_VERSION,
     decidedAt: ctx.now,
     latencyMs: Date.now() - startedAt,
@@ -71,6 +79,11 @@ function describeError(err: unknown): string {
  */
 export function isolateProvider(provider: DecisionProvider, options: IsolatedProviderOptions = {}): DecisionProvider {
   const budgetMs = options.budgetMs ?? DEFAULT_BUDGET_MS;
+  const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+  if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 1) {
+    throw new RangeError("maxConcurrent must be a positive safe integer");
+  }
+  let activeCalls = 0;
 
   return {
     id: provider.id,
@@ -78,6 +91,16 @@ export function isolateProvider(provider: DecisionProvider, options: IsolatedPro
 
     async decide(input: TelemetrySnapshot, ctx: DecisionContext): Promise<DecisionResult> {
       const startedAt = Date.now();
+      const requestedTimestamp = ctx.now.getTime();
+      const fallbackCtx = {
+        ...ctx,
+        now: new Date(Number.isFinite(requestedTimestamp) ? requestedTimestamp : startedAt),
+      };
+      const providerCtx = { ...ctx, now: new Date(fallbackCtx.now.getTime()) };
+      if (activeCalls >= maxConcurrent) {
+        return isolationAbstain(provider, fallbackCtx, startedAt, `${ISOLATION_OVERLOADED}: provider '${provider.id}' 동시 실행 상한(${maxConcurrent})에 도달했다`);
+      }
+      activeCalls += 1;
       let timer: ReturnType<typeof setTimeout> | undefined;
 
       // D3: budget 타이머를 provider 호출보다 먼저 등록한다. provider가 내부적으로도
@@ -93,7 +116,13 @@ export function isolateProvider(provider: DecisionProvider, options: IsolatedPro
       // provider.decide()가 동기적으로 throw하더라도 async 래퍼 안에서 호출하면 그 throw는
       // rejected promise로 바뀐다 — 따라서 sync throw와 async reject를 같은 catch 경로에서
       // 통일해서 처리할 수 있다.
-      const providerCall = (async () => provider.decide(input, ctx))();
+      const providerCall = (async () => provider.decide(input, providerCtx))();
+      // timeout은 caller를 해방하지만 provider API에는 취소 계약이 없다. 실제 provider 호출이
+      // 끝날 때까지 슬롯을 유지해 고장난 provider에 대한 반복 호출이 무한히 쌓이지 않게 한다.
+      providerCall.then(
+        () => { activeCalls -= 1; },
+        () => { activeCalls -= 1; },
+      );
 
       try {
         const outcome = await Promise.race([providerCall, timeoutPromise]);
@@ -108,7 +137,7 @@ export function isolateProvider(provider: DecisionProvider, options: IsolatedPro
           });
           return isolationAbstain(
             provider,
-            ctx,
+            fallbackCtx,
             startedAt,
             `${ISOLATION_TIMEOUT}: provider '${provider.id}'가 budget(${budgetMs}ms)을 초과했다`,
           );
@@ -118,7 +147,7 @@ export function isolateProvider(provider: DecisionProvider, options: IsolatedPro
         if (!parsed.success) {
           return isolationAbstain(
             provider,
-            ctx,
+            fallbackCtx,
             startedAt,
             `${ISOLATION_INVALID_SHAPE}: provider '${provider.id}'의 반환값이 decision schema를 어겼다 — ${parsed.error.message}`,
           );
@@ -128,7 +157,7 @@ export function isolateProvider(provider: DecisionProvider, options: IsolatedPro
       } catch (err) {
         return isolationAbstain(
           provider,
-          ctx,
+          fallbackCtx,
           startedAt,
           `${ISOLATION_PROVIDER_ERROR}: provider '${provider.id}'가 실패했다 — ${describeError(err)}`,
         );

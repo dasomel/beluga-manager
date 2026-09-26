@@ -97,6 +97,64 @@ test("동기적으로 throw하는 provider는 ABSTAIN하고 절대 전파되지 
   expect(result.abstainReason).toContain("thrower");
 });
 
+test("provider metadata가 비어도 오류 fallback은 유효한 ABSTAIN 결과를 반환한다", async () => {
+  const now = new Date("2026-09-25T00:00:00Z");
+  const invalidMetadata = { ...syncThrowingProvider(""), version: "" };
+  const wrapped = isolateProvider(invalidMetadata, { budgetMs: 100 });
+
+  const result = await wrapped.decide(snapshotAt(now), contextAt(now));
+
+  expect(result.decision).toBe("ABSTAIN");
+  expect(result.provider).toBe("unknown-provider");
+  expect(result.providerVersion).toBe("unknown-version");
+  expect(() => decisionResultSchema.parse(result)).not.toThrow();
+});
+
+test("provider가 context timestamp를 훼손하고 실패해도 원래 timestamp로 ABSTAIN한다", async () => {
+  const now = new Date("2026-09-25T00:00:00Z");
+  const mutatingProvider: DecisionProvider = {
+    id: "mutator",
+    version: "1.0.0",
+    decide: async (_input, ctx) => {
+      ctx.now.setTime(Number.NaN);
+      throw new Error("provider failure");
+    },
+  };
+  const result = await isolateProvider(mutatingProvider).decide(snapshotAt(now), contextAt(now));
+
+  expect(result.decision).toBe("ABSTAIN");
+  expect(result.decidedAt).toEqual(now);
+  expect(() => decisionResultSchema.parse(result)).not.toThrow();
+});
+
+test.each([Number.NaN, Number.POSITIVE_INFINITY, 0, 1.5])("invalid maxConcurrent %s is rejected", (maxConcurrent) => {
+  expect(() => isolateProvider(syncThrowingProvider("invalid-limit"), { maxConcurrent })).toThrow(RangeError);
+});
+
+test("timeout 뒤 미완료 provider는 실행 슬롯을 점유해 추가 호출을 제한한다", async () => {
+  const now = new Date("2026-09-25T00:00:00Z");
+  let resolveCall!: (result: DecisionResult) => void;
+  const deferredCall = new Promise<DecisionResult>((resolve) => { resolveCall = resolve; });
+  const provider: DecisionProvider = {
+    id: "stuck",
+    version: "1.0.0",
+    decide: () => deferredCall,
+  };
+  const wrapped = isolateProvider(provider, { budgetMs: 10, maxConcurrent: 1 });
+
+  const firstCall = wrapped.decide(snapshotAt(now), contextAt(now));
+  await vi.advanceTimersByTimeAsync(10);
+  expect((await firstCall).abstainReason).toContain("ISOLATION_TIMEOUT");
+
+  const secondResult = await wrapped.decide(snapshotAt(now), contextAt(now));
+  expect(secondResult.abstainReason).toContain("ISOLATION_OVERLOADED");
+
+  resolveCall(validResult(now));
+  await vi.advanceTimersByTimeAsync(0);
+  const thirdResult = await wrapped.decide(snapshotAt(now), contextAt(now));
+  expect(thirdResult.decision).toBe("NORMAL");
+});
+
 test("async reject하는 provider는 ABSTAIN하고 절대 전파되지 않는다", async () => {
   const now = new Date("2026-09-25T00:00:00Z");
   const rejecting = delayedProvider("rejector", 10, { error: new Error("네트워크 실패") });
