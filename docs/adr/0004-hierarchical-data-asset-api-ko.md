@@ -211,19 +211,21 @@ export const dataAssetListQuerySchema = statusFilterableListQuerySchema.extend({
 ### D4 — 파생되고 접두사가 붙은 식별자, segment별 percent-encoding; 새로운 영속 매핑 없음
 
 `id`는 여전히 opaque 문자열이지만 저장된 UUID가 아니라 qualified name으로부터 결정적으로 파생되는,
-kind가 접두사로 붙은 관례를 따른다. **기본 encoding**: 각 path segment(namespace segment, table
-이름, topic 이름)는 join 전에 독립적으로 percent-encode된다 — 먼저 `%` → `%25`, 그다음 `.` → `%2E`.
-인코딩된 segment는 절대 literal `.`을 포함할 수 없으므로, join된 id 안의 모든 `.`은 명확하게 segment
-경계이며, encoding은 되돌릴 수 있다(id를 `.`으로 split한 뒤 각 부분을 percent-decode). 이 규칙이
-없으면 D8과 충돌한다: `path: string[]`는 두 세그먼트짜리 namespace와, 우연히 dot을 포함한 단일
-segment를 둘 다 표현할 수 있는데, escaping 없이 dot-join하면 둘이 같은 문자열로 붕괴한다.
+kind가 접두사로 붙은 관례를 따른다. **기본 encoding**: 모든 가변 식별자 segment(catalog, namespace
+segment, table 이름, Kafka cluster, topic 이름)는 join 전에 독립적으로 percent-encode된다 — 먼저 `%`
+→ `%25`, 그다음 `.` → `%2E`. 인코딩된 segment는 절대 literal `.`을 포함할 수 없으므로, join된 id
+안의 모든 `.`은 명확하게 segment 경계이며, encoding은 되돌릴 수 있다(가변 부분을 `.`으로 split한
+뒤 각 부분을 percent-decode). 이 규칙이 없으면 D8과 충돌한다: `path: string[]`는 두 세그먼트짜리
+namespace와, 우연히 dot을 포함한 단일 segment를 둘 다 표현할 수 있는데, escaping 없이 dot-join하면
+둘이 같은 문자열로 붕괴한다. namespace/table/topic만 encode하면 catalog와 Kafka cluster 이름이 여전히
+모호하다.
 
 | Kind | 관례 | 예 |
 |---|---|---|
-| catalog | `asset-catalog-<catalog>` | `asset-catalog-iceberg` |
-| schema | `asset-schema-<catalog>.<percent-encode된 namespace segment들, dot-join>` | `asset-schema-iceberg.analytics` |
-| table | `asset-table-<catalog>.<percent-encode된 namespace segment들, dot-join>.<percent-encode된 table 이름>` | `asset-table-iceberg.analytics.orders` |
-| topic | `asset-topic-<kafka-cluster>.<percent-encode된 topic 이름>` | `asset-topic-kafka.events-raw` |
+| catalog | `asset-catalog-<encode된 catalog>` | `asset-catalog-iceberg` |
+| schema | `asset-schema-<encode된 catalog>.<encode된 namespace segment들, dot-join>` | `asset-schema-iceberg.analytics` |
+| table | `asset-table-<encode된 catalog>.<encode된 namespace segment들, dot-join>.<encode된 table 이름>` | `asset-table-iceberg.analytics.orders` |
+| topic | `asset-topic-<encode된 Kafka cluster>.<encode된 topic 이름>` | `asset-topic-kafka.events-raw` |
 
 encoding이 필요한 이유를 보여주는 예:
 
@@ -231,6 +233,7 @@ encoding이 필요한 이유를 보여주는 예:
 - literal하게 `"a.b"`라는 이름의 단일 namespace segment → `asset-schema-iceberg.a%2Eb` — encoding된
   덕분에, naive하게 dot-join하면 둘 다 `"a.b"`가 되는 위의 두-segment 경우와 절대 충돌하지 않는다.
 - namespace `["analytics"]` 아래 `"orders.v2"`라는 이름의 table → `asset-table-iceberg.analytics.orders%2Ev2`.
+- `"ice.berg"`라는 이름의 catalog → `asset-catalog-ice%2Eberg`; Kafka cluster 이름에도 같은 규칙을 적용한다.
 
 - **이유**: 별도의 lookup table 없이 upstream identity로부터 파생 가능 — "second metadata store
   없음"(driver 2)과 일치한다. 접두사가 kind와 소유 서비스/catalog를 모두 인코딩하므로 서비스 간에

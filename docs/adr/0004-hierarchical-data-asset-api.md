@@ -214,20 +214,22 @@ export const dataAssetListQuerySchema = statusFilterableListQuerySchema.extend({
 ### D4 — Derived, prefixed identifiers, percent-encoded per segment; no new persisted mapping
 
 `id` stays an opaque string but follows a deterministic, kind-prefixed convention derived from the
-qualified name, not a stored UUID. **Default encoding**: each path segment (namespace segment, table
-name, or topic name) is percent-encoded independently — `%` → `%25` first, then `.` → `%2E` — before
-being joined with a literal `.` separator. Because an encoded segment can never itself contain a
-literal `.`, every `.` in the joined id is unambiguously a segment boundary, and the encoding is
-reversible (split the id on `.`, then percent-decode each part). Without this, a naive dot-join
-contradicts D8: `path: string[]` can represent both a two-segment namespace and a single segment that
-happens to contain a dot, and dot-joining them without escaping collapses both to the same string.
+qualified name, not a stored UUID. **Default encoding**: every variable identifier segment (catalog,
+namespace segment, table name, Kafka cluster, or topic name) is percent-encoded independently — `%`
+→ `%25` first, then `.` → `%2E` — before being joined with literal `.` separators. Because an encoded
+segment can never itself contain a literal `.`, every `.` in the joined id is unambiguously a segment
+boundary, and the encoding is reversible (split the variable portion on `.`, then percent-decode each
+part). Without this, a naive dot-join contradicts D8: `path: string[]` can represent both a two-segment
+namespace and a single segment that happens to contain a dot, and dot-joining them without escaping
+collapses both to the same string. Encoding only namespace/table/topic segments would still leave
+catalog and Kafka cluster names ambiguous.
 
 | Kind | Convention | Example |
 |---|---|---|
-| catalog | `asset-catalog-<catalog>` | `asset-catalog-iceberg` |
-| schema | `asset-schema-<catalog>.<percent-encoded namespace segments, dot-joined>` | `asset-schema-iceberg.analytics` |
-| table | `asset-table-<catalog>.<percent-encoded namespace segments, dot-joined>.<percent-encoded table name>` | `asset-table-iceberg.analytics.orders` |
-| topic | `asset-topic-<kafka-cluster>.<percent-encoded topic name>` | `asset-topic-kafka.events-raw` |
+| catalog | `asset-catalog-<encoded catalog>` | `asset-catalog-iceberg` |
+| schema | `asset-schema-<encoded catalog>.<encoded namespace segments, dot-joined>` | `asset-schema-iceberg.analytics` |
+| table | `asset-table-<encoded catalog>.<encoded namespace segments, dot-joined>.<encoded table name>` | `asset-table-iceberg.analytics.orders` |
+| topic | `asset-topic-<encoded Kafka cluster>.<encoded topic name>` | `asset-topic-kafka.events-raw` |
 
 Examples that motivate the encoding:
 
@@ -236,6 +238,7 @@ Examples that motivate the encoding:
   never collides with the two-segment case above even though a naive dot-join would produce `"a.b"`
   for both.
 - A table named `"orders.v2"` under namespace `["analytics"]` → `asset-table-iceberg.analytics.orders%2Ev2`.
+- A catalog named `"ice.berg"` → `asset-catalog-ice%2Eberg`; the same rule applies to Kafka cluster names.
 
 - **Reason**: derivable from upstream identity with no lookup table — consistent with "no second
   metadata store" (driver 2); collision-safe across services because the prefix encodes both kind and
