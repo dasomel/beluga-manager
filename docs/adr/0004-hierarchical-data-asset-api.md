@@ -1,8 +1,9 @@
 # ADR-0004: Hierarchical Data Asset API — Catalog → Schema → Table → Column
 
-- **Status**: Accepted (direction) — extend the API to be hierarchical, decided by dasomel.
-  The endpoint/schema/phasing design below is **not yet implemented**; `packages/web` still renders
-  `DataCatalogView.tsx` from `packages/web/src/data/mockData.ts`.
+- **Status**: Accepted (direction) — extend the API to be hierarchical, decided by dasomel; **partially
+  implemented** as of 2026-09-29. Commit `ada545e` added `GET /api/v1/data-assets/{id}` and moved
+  `DataCatalogView` to the real flat list/detail APIs. The `parentId` hierarchy, catalog/schema
+  navigation, upstream adapters, and node-level authorization described here remain unimplemented.
 - **Date**: 2026-09-24
 - **Issue**: [#36 \[ROADMAP\]\[DOMAIN\] Data Asset Domain Model — Catalog + Query Integration](https://github.com/dasomel/beluga-manager/issues/36),
   [#15 \[ROADMAP\]\[UX\] Data Catalog — Iceberg Catalog / Schema / Table Explorer](https://github.com/dasomel/beluga-manager/issues/15),
@@ -20,21 +21,17 @@ a **flat**, paginated list of `DataAsset` rows (`packages/domain-api/src/schema/
 `{ id, name, kind, serviceId, status }` with `kind: "table" | "topic" | "schema"`. There is no
 parent/child relationship in the schema or the stub data (`packages/domain-api/src/stub-data/dataAssets.ts`).
 
-`DataCatalogView.tsx` (`packages/web/src/views/`) is hierarchical — a left-hand catalog/schema/table
-navigator driving a right-hand table-detail panel with a column schema table — and is wired to
-`catalogTablesData` in `packages/web/src/data/mockData.ts`, not the real API. The code comment on the
-view records why:
+`DataCatalogView.tsx` now reads the flat table list from `GET /api/v1/data-assets` and the selected
+table detail from `GET /api/v1/data-assets/{id}` (implemented in commit `ada545e`, issue #15). Its
+left pane still shows a flat table list beneath the hard-coded `beluga_lake / default` labels; it does
+not yet navigate catalog and schema nodes. The previous mock-data rationale was removed when the
+real list/detail calls landed. The `CatalogTable` type from `mockData.ts` remains as a UI/query handoff
+shape; the view no longer reads `catalogTablesData`.
 
-```
-// Still on mock data: the real GET /api/v1/data-assets is a flat list, but this view is a
-// hierarchical catalog -> schema -> table -> column navigator per ADR-0001 -- wiring a flat
-// endpoint to a hierarchical view now would misrepresent the API, not integrate it.
-```
-
-The mock's `CatalogTable` shape (`catalog`, `schema`, `table`, `format`, `location`, `columns[]`,
-`snapshotCount`) is itself a preview of the target domain model — it already carries the exact
-three-level qualified name (`catalog.schema.table`) that Trino and this repository's own policy
-compiler use.
+The current `DataAssetDetail` is a flat extension of `DataAsset` with optional table fields
+(`columns`, `location`, `format`, `metadataSummary`). It is not the kind-discriminated hierarchy
+detail shape proposed in D9. The existing endpoint and schema are the compatibility baseline for the
+remaining design.
 
 **Upstream shape this must map onto**, without leaking it raw into the API (per #34, AGENTS.md
 "do not expose OSS API models unchanged"):
@@ -69,10 +66,10 @@ compiler use.
 3. **Lazy, bounded reads** — a catalog can have many schemas and a schema many tables; the UI's own
    navigator (left pane, click-to-expand) does not need — and must not require — the whole tree in
    one response. #43 already requires pagination on every list endpoint.
-4. **Backward compatibility** — `GET /api/v1/data-assets` is implemented and covered by
-   `packages/domain-api/tests/routes-data-assets.test.ts` and the OpenAPI snapshot test. There is,
-   however, **no live caller today** (the frontend is still on mock data); "compatibility" here means
-   *additive, reviewable schema evolution*, not a frozen wire format.
+4. **Compatibility** — `GET /api/v1/data-assets` and `GET /api/v1/data-assets/{id}` are implemented,
+   covered by route/OpenAPI tests, and used by `DataCatalogView`. Changing the list default from all
+   flat assets to top-level catalogs, or changing `name` from fully qualified to leaf-only, affects a
+   live internal caller and requires a coordinated frontend/API migration with explicit contract tests.
 5. **ABAC alignment** (D7) — the hierarchy levels must be the same levels `beluga/policies` already
    scopes grants at (catalog, schema.table, column), so a future authorization pass has a level to
    attach to at each node instead of inventing a new one.
@@ -100,10 +97,10 @@ catalogs; `parentId=<catalogId>` → that catalog's schemas; `parentId=<schemaId
 tables. One recursive shape, one schema, one pagination idiom, matches the navigator's actual
 click-to-expand interaction 1:1.
 
-**Trade-off accepted as D3/D6 below.** The *default* response (no `parentId`) necessarily changes
-meaning — from "every asset, flat" to "top-level catalogs" — which is a breaking change to the one
-endpoint that exists today, but with no live consumer to break. Existing tests are updated as part of
-implementation (see Phase 1 test plan), not frozen.
+**Trade-off accepted as D3/D6 below.** The *default* response (no `parentId`) changes meaning — from
+"every asset, flat" to "top-level catalogs" — and is breaking for the existing `DataCatalogView`
+caller and any external API consumer. Implementation must migrate that caller in the same change and
+update the API contract/tests; if an external consumer appears, use the versioning escape hatch in D6.
 
 ### Option C — New, separate hierarchy endpoint, existing flat endpoint untouched
 
@@ -179,13 +176,13 @@ export const dataAssetSchema = z
   handles them, but `parentId: null` is the well-defined "top-level" case — no separate "root" sentinel
   value is needed.
 
-### D3 — `?parentId=` lazy children on the existing endpoint; single-resource detail endpoint added
+### D3 — `?parentId=` lazy children on the existing endpoint; use the existing detail endpoint
 
 ```
 GET /api/v1/data-assets                      # parentId omitted -> top-level catalogs
 GET /api/v1/data-assets?parentId=<catalogId>  # that catalog's schemas
 GET /api/v1/data-assets?parentId=<schemaId>   # that schema's tables + topics
-GET /api/v1/data-assets/{id}                  # single asset, kind-specific detail (D9 below)
+GET /api/v1/data-assets/{id}                  # single asset detail; proposed hierarchy shape in D9
 ```
 
 `status` and pagination (`page`/`pageSize`) filters keep working unchanged, orthogonal to `parentId`
@@ -267,20 +264,18 @@ identical to every other list endpoint.
   add an opaque `pageToken` alternative to `page` later without breaking `page`/`pageSize` callers
   (mutually exclusive parameters, `page` remains the default).
 
-### D6 — Compatibility posture: additive-schema evolution now, not endpoint versioning
+### D6 — Compatibility posture: coordinated migration of the existing contract
 
 `GET /api/v1/data-assets` is extended in place (D1–D3) rather than introducing `/api/v2/data-assets`
 or a parallel hierarchy resource (Option C).
 
-- **Reason**: there is no live consumer yet (frontend is on mock data); introducing a second resource
-  for the same domain concept before the first one has a real caller would itself violate "not a
-  second source of truth" (driver 2) and #34's not-a-proxy principle, just at the Beluga-API layer
-  instead of the upstream layer.
+- **Reason**: the existing `DataCatalogView` now consumes the flat list and detail endpoints (issue
+  #15, commit `ada545e`). Keeping one resource avoids parallel sources of truth, while coordinating
+  the current caller's migration keeps the API and UI aligned.
 - **Cost**: `routes-data-assets.test.ts` and the OpenAPI snapshot test change in the same PR that ships
-  this; anyone who had started integrating against the current flat shape must be told explicitly
-  (there is no deprecation window because there is no `/api/v2` to deprecate into). This includes
-  `name`'s meaning changing from fully-qualified to leaf-only (see Consequences) — a behavior change,
-  not just an additive one, accepted here for the same reason (no live consumer).
+  this. The current UI is a live caller and the endpoint may have other consumers, so changing the
+  flat default and `name` from fully qualified to leaf-only is an intentional breaking behavior
+  change. Ship the API and UI migration together and document it in the contract.
 - **Escape hatch**: if a real external consumer appears before this ships, version at that point
   (`/api/v2/data-assets`) per the API-versioning principle ADR-0002 already lists as owed.
 
@@ -376,8 +371,10 @@ export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
 - **Reason**: table/topic detail (columns, format, location, snapshots) does not belong in the list
   envelope (driver 3: bounded reads) and is naturally single-resource REST; a discriminated union lets
   each kind carry only the fields that make sense for it instead of an all-optional grab-bag.
-- **Cost**: one more route/schema pair; `@hono/zod-openapi` must render a discriminated union cleanly
-  in the OpenAPI document (verify in Phase 1 against the existing `openapi-document.test.ts` pattern).
+- **Cost**: the detail route already exists (issue #15, commit `ada545e`), but its current schema is
+  a flat object with optional table fields. Moving to this discriminated union changes the existing
+  response schema; `@hono/zod-openapi` must render it cleanly in the OpenAPI document and callers/tests
+  must be migrated together.
   `childCount` on the `catalog`/`schema` members is authorization-sensitive (D7): it must be computed
   from the same authorized child set a subsequent `?parentId=` call would return, never from an
   unfiltered upstream count, or it leaks the existence/cardinality of children the caller cannot see.
@@ -398,16 +395,19 @@ export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
 
 ## Phased implementation plan and test plan
 
-**Phase 1 — Schema and stub data only (no live upstream yet), mirrors today's stub-data pattern.**
+**Phase 1 — API schema and stub data (partially implemented).**
 
-- Extend `dataAssetKindSchema`, `dataAssetSchema` (D1, D2), add `dataAssetColumnSchema` and
-  `dataAssetDetailSchema` (D9) in `packages/domain-api/src/schema/dataAsset.ts`.
+- **Done in issue #15 / commit `ada545e`**: the `GET /api/v1/data-assets/{id}` detail route, table
+  column/metadata summary fields, flat list/detail UI calls, and route/OpenAPI/UI tests.
+- **Remaining**: extend `dataAssetKindSchema` and `dataAssetSchema` (D1, D2); change the existing
+  optional-field `dataAssetDetailSchema` to the reviewed hierarchy shape in D9; add
+  `parentId`/`path` and consistent derived ids (D2/D4) to the stub tree.
 - Rewrite `packages/domain-api/src/stub-data/dataAssets.ts` as a small hand-authored
   catalog→schema→table(+topic) tree with consistent derived ids (D4) and `parentId`/`path` (D2), kept
   small and explicit like the current 4-row stub.
 - Extend `registerDataAssetRoutes` (`packages/domain-api/src/routes/dataAssets.ts`) with `parentId`
-  filtering and add the `GET /api/v1/data-assets/{id}` route.
-- **Tests**: rewrite `routes-data-assets.test.ts`'s "all kinds present" assertion for the new
+  filtering; retain and evolve the existing detail route.
+- **Tests**: rewrite `routes-data-assets.test.ts`'s existing flat-list assertions for the new
   top-level default; add cases for `?parentId=` at each level (catalog→schema, schema→table),
   `?parentId=` for an unknown id (empty list, not 404 — a parent existing is not guaranteed by this
   endpoint's contract), `GET /api/v1/data-assets/{id}` for each kind (200 with the right union member)
@@ -418,13 +418,14 @@ export const dataAssetDetailSchema = z.discriminatedUnion("kind", [
   must derive to different ids). Add a `childCount` test asserting the Phase 1 stub returns `null`
   (D7/D9's interim, pre-OPA-filtering posture), not an unfiltered number.
 
-**Phase 2 — Frontend integration.**
+**Phase 2 — Frontend hierarchy integration (partially implemented).**
 
-- Replace `catalogTablesData` in `DataCatalogView.tsx` with the four calls in the screen-mapping
-  table above (likely via TanStack Query, per ADR-0001), remove the mock-data code comment, keep
-  `mockData.ts`'s `CatalogTable` type only if still used elsewhere (grep before deleting).
-- **Tests**: component/integration tests for expand/collapse driving the right `parentId` calls, and
-  for the detail panel rendering each of the four `dataAssetDetailSchema` union members.
+- **Done in issue #15 / commit `ada545e`**: `DataCatalogView.tsx` reads the flat asset list and fetches
+  selected table details through the Domain API; tests cover the list/detail view.
+- **Remaining**: replace the static `beluga_lake / default` labels and flat table list with lazy
+  catalog/schema expansion using `parentId`, build qualified names from `path` + `name`, and cover
+  expand/collapse and all detail union members. `CatalogTable` remains a UI/query handoff type in
+  `mockData.ts`; remove it only if no longer referenced after that migration.
 
 **Phase 3 — Live Iceberg/Trino adapter** (depends on #41/#42's adapter work landing first;
 out of scope for this ADR beyond the id/path derivation contract D2/D4 the adapter must satisfy).
@@ -442,16 +443,15 @@ rollout to a real (non-developer) user until resolved.
 - `dataAssetKindSchema`, `dataAssetSchema`, and the OpenAPI document for `/api/v1/data-assets` all
   change; `routes-data-assets.test.ts` and `openapi-document.test.ts` are updated in the same change,
   not preserved as frozen golden files (D6).
-- A new `DataAssetColumn`/`DataAssetDetail` schema pair and a new `GET /api/v1/data-assets/{id}` route
-  are added.
-- `DataCatalogView.tsx`'s mock-data comment is updated to point at this ADR (done alongside this ADR;
-  see the one-line diff in the same commit) — the code itself stays on mock data until Phase 2 ships.
+- `DataAssetColumn`/`DataAssetDetail` and `GET /api/v1/data-assets/{id}` were added in issue #15; the
+  remaining design evolves the current detail schema to the hierarchy contract.
+- `DataCatalogView.tsx` already consumes the real flat list/detail endpoints (issue #15); the
+  remaining hierarchy work changes that live caller and must ship with the API contract migration.
 - `dataAssetSchema.name`'s semantics change from fully-qualified (today's implementation, e.g.
   `analytics.orders` per `packages/domain-api/src/schema/dataAsset.ts:9`) to leaf-only (this ADR's D2
   example, `orders`; the qualified form is reconstructed from `path` + `name`, D8). This is a behavior
-  change to an existing field, not merely an additive one — low real risk per D6 (no live consumer to
-  break); the escape hatch is D6's: if a real consumer of the current fully-qualified `name` appears
-  before this ships, version (`/api/v2`) instead of changing the field's meaning in place.
+  change to an existing field. Review impact on the current UI caller and other consumers, then apply D6's
+  coordinated migration and versioning rule.
 - No new persisted store; the hierarchy remains fully derived, consistent with the standing "no second
   metadata store" principle.
 - Authorization enforcement for hierarchy nodes (D7) is explicitly **not** solved by this ADR — it is

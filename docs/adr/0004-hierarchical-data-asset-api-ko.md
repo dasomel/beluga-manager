@@ -1,8 +1,9 @@
 # ADR-0004: 계층적 Data Asset API — Catalog → Schema → Table → Column
 
-- **상태**: 승인됨(방향) — API를 계층적으로 확장하기로 dasomel이 결정. 아래의 엔드포인트/스키마/
-  단계 설계는 **아직 구현되지 않았다**. `packages/web`은 여전히 `packages/web/src/data/mockData.ts`로
-  `DataCatalogView.tsx`를 렌더링한다.
+- **상태**: 승인됨(방향) — API를 계층적으로 확장하기로 dasomel이 결정; 2026-09-29 현재 **부분 구현됨**.
+  커밋 `ada545e`가 `GET /api/v1/data-assets/{id}`를 추가하고 `DataCatalogView`를 실제 flat 목록/detail
+  API로 전환했다. 여기서 설명하는 `parentId` 계층, catalog/schema 탐색, upstream adapter, 노드별
+  authorization은 아직 구현되지 않았다.
 - **날짜**: 2026-09-24
 - **이슈**: [#36 \[ROADMAP\]\[DOMAIN\] Data Asset Domain Model — Catalog + Query Integration](https://github.com/dasomel/beluga-manager/issues/36),
   [#15 \[ROADMAP\]\[UX\] Data Catalog — Iceberg Catalog / Schema / Table Explorer](https://github.com/dasomel/beluga-manager/issues/15),
@@ -20,20 +21,16 @@
 `{ id, name, kind, serviceId, status }`, `kind: "table" | "topic" | "schema"`. 스키마나 stub
 데이터(`packages/domain-api/src/stub-data/dataAssets.ts`) 어디에도 부모/자식 관계는 없다.
 
-`DataCatalogView.tsx`(`packages/web/src/views/`)는 계층적이다 — 왼쪽 catalog/schema/table
-navigator가 오른쪽 table-detail 패널(column schema 표 포함)을 구동한다 — 그리고 실제 API가 아니라
-`packages/web/src/data/mockData.ts`의 `catalogTablesData`에 연결되어 있다. 화면 코드의 주석이
-이유를 기록한다:
+`DataCatalogView.tsx`는 이제 `GET /api/v1/data-assets`에서 flat table 목록을, 선택한 table 상세는
+`GET /api/v1/data-assets/{id}`에서 읽는다(issue #15, 커밋 `ada545e`). 왼쪽 패널은 아직 고정된
+`beluga_lake / default` 라벨 아래 flat table 목록을 보여주며 catalog/schema 노드를 탐색하지 않는다.
+실제 목록/detail 호출이 추가되면서 기존 mock-data 설명 주석은 제거됐다. `mockData.ts`의
+`CatalogTable` 타입은 UI와 query 전달용 모양으로 남아 있지만, 화면은 더 이상 `catalogTablesData`를
+읽지 않는다.
 
-```
-// Still on mock data: the real GET /api/v1/data-assets is a flat list, but this view is a
-// hierarchical catalog -> schema -> table -> column navigator per ADR-0001 -- wiring a flat
-// endpoint to a hierarchical view now would misrepresent the API, not integrate it.
-```
-
-mock의 `CatalogTable` 모양(`catalog`, `schema`, `table`, `format`, `location`, `columns[]`,
-`snapshotCount`)은 그 자체로 목표 domain model의 미리보기다 — 이미 Trino와 이 저장소의 policy
-compiler가 쓰는 정확히 그 3단계 qualified name(`catalog.schema.table`)을 담고 있다.
+현재 `DataAssetDetail`은 선택적 table 필드(`columns`, `location`, `format`, `metadataSummary`)를 가진
+flat `DataAsset` 확장이다. D9가 제안하는 kind 판별형 hierarchy detail 모양은 아니다. 기존 route와
+schema를 남은 설계의 호환성 기준으로 삼는다.
 
 **여기에 매핑해야 할 upstream 모양**(#34, AGENTS.md "OSS API 모델을 그대로 노출하지 않는다"에 따라
 그대로 API에 노출하지 않고):
@@ -66,10 +63,10 @@ compiler가 쓰는 정확히 그 3단계 qualified name(`catalog.schema.table`)�
 3. **Lazy, bounded reads** — 하나의 catalog는 다수의 schema를, 하나의 schema는 다수의 table을 가질
    수 있다. UI의 navigator(왼쪽 패널, click-to-expand) 자체가 한 응답에 전체 tree를 필요로 하지도
    않고 요구해서도 안 된다. #43은 이미 모든 목록 엔드포인트에 pagination을 요구한다.
-4. **하위 호환성** — `GET /api/v1/data-assets`는 이미 구현되어 있고
-   `packages/domain-api/tests/routes-data-assets.test.ts`와 OpenAPI snapshot 테스트로 덮여 있다.
-   그러나 **오늘 실제 caller는 없다**(frontend는 여전히 mock 데이터). 여기서 "호환성"은 *고정된
-   wire format*이 아니라 *추가적(additive)이고 리뷰 가능한 스키마 진화*를 의미한다.
+4. **호환성** — `GET /api/v1/data-assets`와 `GET /api/v1/data-assets/{id}`는 구현되어 있고 route/OpenAPI
+   테스트가 있으며 `DataCatalogView`가 사용한다. 목록 기본값을 모든 flat asset에서 최상위 catalog로
+   바꾸거나 `name`을 fully-qualified에서 leaf-only로 바꾸면 실제 내부 caller에 영향을 준다. 명시적
+   contract 테스트와 프론트/API 동시 이전이 필요하다.
 5. **ABAC 정합성**(D7) — 계층 레벨은 `beluga/policies`가 이미 grant를 scoping하는 레벨(catalog,
    schema.table, column)과 같아야 한다. 그래야 미래의 authorization 단계가 새 레벨을 발명하지 않고
    기존 레벨에 붙을 수 있다.
@@ -96,10 +93,10 @@ catalog들; `parentId=<catalogId>` → 그 catalog의 schema들; `parentId=<sche
 table들. 하나의 재귀적 모양, 하나의 스키마, 하나의 pagination idiom이며 navigator의 실제
 click-to-expand interaction과 1:1로 대응한다.
 
-**아래 D3/D6으로 받아들인 trade-off.** *기본* 응답(`parentId` 없음)의 의미는 필연적으로 바뀐다 —
-"모든 asset, flat"에서 "최상위 catalog들"로 — 오늘 존재하는 유일한 엔드포인트에 대한 breaking
-change이지만, 깨질 live consumer가 없다. 기존 테스트는 구현의 일부로(Phase 1 test plan 참조)
-업데이트되며 고정되지 않는다.
+**아래 D3/D6으로 받아들인 trade-off.** *기본* 응답(`parentId` 없음)의 의미는 "모든 asset, flat"에서
+"최상위 catalog들"로 바뀌며 기존 `DataCatalogView` caller와 외부 API 소비자에게 breaking change다.
+구현 시 caller를 같은 변경에서 이전하고 API contract/test를 갱신해야 한다. 외부 소비자가 생기면 D6의
+버전 관리 escape hatch를 사용한다.
 
 ### Option C — 새로운 별도 hierarchy 엔드포인트, 기존 flat 엔드포인트는 그대로 유지
 
@@ -177,13 +174,13 @@ export const dataAssetSchema = z
   처리해야 하지만, `parentId: null`이 잘 정의된 "최상위" 케이스다 — 별도의 "root" sentinel 값은
   필요하지 않다.
 
-### D3 — 기존 엔드포인트에 `?parentId=` lazy children; single-resource detail 엔드포인트 추가
+### D3 — 기존 엔드포인트에 `?parentId=` lazy children; 기존 detail 엔드포인트 사용
 
 ```
 GET /api/v1/data-assets                      # parentId 생략 -> 최상위 catalog들
 GET /api/v1/data-assets?parentId=<catalogId>  # 그 catalog의 schema들
 GET /api/v1/data-assets?parentId=<schemaId>   # 그 schema의 table + topic들
-GET /api/v1/data-assets/{id}                  # 단일 asset, kind별 detail(아래 D9)
+GET /api/v1/data-assets/{id}                  # 단일 asset detail; D9에서 hierarchy 모양 제안
 ```
 
 `status`와 pagination(`page`/`pageSize`) 필터는 `parentId`와 직교하여 변경 없이 계속 동작한다(예:
@@ -260,20 +257,18 @@ Children 목록(`?parentId=`)은 다른 모든 목록 엔드포인트와 동일�
   `page`/`pageSize` caller를 깨지 않고 나중에 opaque `pageToken` 대안을 추가한다(상호 배타적
   파라미터, `page`가 기본값으로 유지).
 
-### D6 — 호환성 태도: 지금은 endpoint versioning이 아니라 additive 스키마 진화
+### D6 — 호환성 태도: 기존 contract와 caller의 동시 이전
 
 `GET /api/v1/data-assets`는 (Option C처럼) `/api/v2/data-assets`나 병렬 hierarchy 리소스를 도입하는
 대신 D1–D3에 따라 그 자리에서 확장된다.
 
-- **이유**: 아직 live consumer가 없다(frontend는 mock 데이터). 첫 번째 리소스가 실제 caller를 갖기도
-  전에 같은 domain 개념을 위한 두 번째 리소스를 만드는 것은, upstream 레벨이 아니라 Beluga API
-  레벨에서 그 자체로 "second source of truth 없음"(driver 2)과 #34의 not-a-proxy 원칙을 위반하는
-  셈이다.
-- **비용**: 이 기능을 배포하는 같은 PR에서 `routes-data-assets.test.ts`와 OpenAPI snapshot 테스트가
-  바뀐다. 현재 flat 모양에 대해 통합을 시작했던 누구든 명시적으로 통지받아야 한다(deprecate할
-  `/api/v2`가 없으므로 deprecation window가 없다). 여기에는 `name`의 의미가 fully-qualified에서
-  leaf-only로 바뀌는 것도 포함된다(Consequences 참조) — 단순 additive가 아니라 behavior change지만,
-  같은 이유(live consumer 없음)로 여기서 받아들인다.
+- **이유**: 기존 `DataCatalogView`는 이제 flat 목록/detail endpoint를 소비한다(issue #15, 커밋 `ada545e`).
+  하나의 리소스를 유지하면 중복 source of truth를 피할 수 있고, 현재 caller를 함께 이전하면 API와 UI가
+  계속 일치한다.
+- **비용**: 이를 배포하는 같은 PR에서 `routes-data-assets.test.ts`와 OpenAPI snapshot 테스트를 바꿔야
+  한다. 실제 caller인 UI와 다른 API 소비자에게 flat 기본값 및 fully-qualified `name`에서의 변경을
+  알려야 한다. 이는 의도적인 breaking behavior change이므로 API와 UI 이전을 함께 배포하고 contract에
+  기록한다.
 - **escape hatch**: 이 기능이 배포되기 전에 실제 외부 consumer가 나타나면, ADR-0002가 이미 부채로
   나열한 API-versioning 원칙에 따라 그 시점에 버전을 올린다(`/api/v2/data-assets`).
 
@@ -370,8 +365,9 @@ format badge, location, snapshot count)이 만들어지는 원천이다.
 - **이유**: table/topic detail(column, format, location, snapshot)은 목록 envelope에 속하지 않고
   (driver 3: bounded reads) 자연스럽게 single-resource REST다. discriminated union은 all-optional
   grab-bag 대신 각 kind가 자신에게 의미 있는 필드만 가지게 한다.
-- **비용**: route/schema 쌍이 하나 더 늘어난다. `@hono/zod-openapi`가 discriminated union을 OpenAPI
-  문서에 깨끗하게 렌더링해야 한다(Phase 1에서 기존 `openapi-document.test.ts` 패턴으로 검증).
+- **비용**: detail route는 이미 존재한다(issue #15, 커밋 `ada545e`). 다만 현재 schema는 선택적 table
+  필드가 있는 flat object다. discriminated union으로 바꾸면 기존 response schema가 변경되므로,
+  `@hono/zod-openapi`의 OpenAPI 렌더링을 확인하고 caller/test를 함께 이전해야 한다.
   `catalog`/`schema` 멤버의 `childCount`는 authorization에 민감하다(D7): 이후의 `?parentId=` 호출이
   반환할 것과 같은 인가된 자식 집합으로부터 계산되어야 하며, 절대 필터링되지 않은 upstream count에서
   계산되어서는 안 된다 — 그렇지 않으면 caller가 볼 수 없는 자식의 existence/cardinality를 노출한다.
@@ -392,15 +388,18 @@ format badge, location, snapshot count)이 만들어지는 원천이다.
 
 ## 단계별 구현 계획과 test plan
 
-**Phase 1 — 스키마와 stub 데이터만(아직 live upstream 없음), 오늘의 stub-data 패턴을 그대로 따름.**
+**Phase 1 — API schema와 stub 데이터(부분 구현).**
 
-- `packages/domain-api/src/schema/dataAsset.ts`에서 `dataAssetKindSchema`, `dataAssetSchema`(D1,
-  D2)를 확장하고 `dataAssetColumnSchema`, `dataAssetDetailSchema`(D9)를 추가한다.
+- **issue #15 / 커밋 `ada545e`에서 완료**: `GET /api/v1/data-assets/{id}` detail route, table column/metadata
+  summary 필드, flat 목록/detail UI 호출, route/OpenAPI/UI 테스트.
+- **남은 작업**: `dataAssetKindSchema`와 `dataAssetSchema`(D1, D2)를 확장하고, 기존 선택 필드형
+  `dataAssetDetailSchema`를 D9에서 검토한 hierarchy shape로 변경한다. Stub tree에 `parentId`/`path`와
+  일관된 파생 id(D2/D4)를 추가한다.
 - `packages/domain-api/src/stub-data/dataAssets.ts`를 일관된 파생 id(D4)와 `parentId`/`path`(D2)를
   가진 작은 손으로 작성한 catalog→schema→table(+topic) tree로 다시 쓴다. 지금의 4행 stub처럼 작고
   명시적으로 유지한다.
 - `registerDataAssetRoutes`(`packages/domain-api/src/routes/dataAssets.ts`)에 `parentId` 필터링을
-  추가하고 `GET /api/v1/data-assets/{id}` route를 추가한다.
+  추가하고 기존 detail route를 유지·발전시킨다.
 - **테스트**: 새로운 최상위 기본값에 맞춰 `routes-data-assets.test.ts`의 "모든 kind 존재" 단언을
   다시 쓴다. 각 레벨(catalog→schema, schema→table)에서의 `?parentId=`, 알 수 없는 id에 대한
   `?parentId=`(빈 목록, 404 아님 — 이 엔드포인트의 계약은 부모의 존재를 보장하지 않는다), 각 kind에
@@ -412,13 +411,14 @@ format badge, location, snapshot count)이 만들어지는 원천이다.
   서로 다른 id로 파생되어야 한다). `childCount`가 Phase 1 stub에서 `null`을 반환하는지(D7/D9의
   interim, OPA 필터링 이전 posture) — 필터링되지 않은 숫자가 아님을 — 검증하는 테스트를 추가한다.
 
-**Phase 2 — Frontend 통합.**
+**Phase 2 — Frontend 계층 탐색 통합(부분 구현).**
 
-- `DataCatalogView.tsx`의 `catalogTablesData`를 위 화면 매핑 표의 네 호출로 교체한다(ADR-0001에
-  따라 아마도 TanStack Query 경유), mock-data 코드 주석을 제거하고, `mockData.ts`의 `CatalogTable`
-  타입은 다른 곳에서 여전히 쓰인다면(삭제 전에 grep) 유지한다.
-- **테스트**: expand/collapse가 올바른 `parentId` 호출을 구동하는지에 대한 component/integration
-  테스트, 그리고 `dataAssetDetailSchema` union의 네 멤버 각각을 렌더링하는 detail 패널 테스트.
+- **issue #15 / 커밋 `ada545e`에서 완료**: `DataCatalogView.tsx`가 flat asset 목록을 읽고 선택한 table
+  상세를 Domain API에서 가져온다. 기존 테스트는 목록/detail 화면을 검증한다.
+- **남은 작업**: 고정된 `beluga_lake / default` 라벨과 flat table 목록을 `parentId` 기반 catalog/schema
+  expand로 교체하고, `path` + `name`으로 qualified name을 만들며, expand/collapse 및 모든 detail union
+  멤버를 테스트한다. `CatalogTable`은 `mockData.ts`에서 UI/query 전달 타입으로 남아 있다. 이전 후 더
+  이상 참조되지 않는 경우에만 제거한다.
 
 **Phase 3 — Live Iceberg/Trino adapter**(#41/#42의 adapter 작업이 먼저 도착하는 것에 의존; 이
 ADR이 adapter가 만족해야 하는 id/path 파생 계약(D2/D4) 이상은 범위 밖).
@@ -437,16 +437,15 @@ ADR이 adapter가 만족해야 하는 id/path 파생 계약(D2/D4) 이상은 범
 - `dataAssetKindSchema`, `dataAssetSchema`, `/api/v1/data-assets`의 OpenAPI 문서가 모두 바뀐다.
   `routes-data-assets.test.ts`와 `openapi-document.test.ts`는 고정된 golden file로 보존되는 것이
   아니라 같은 변경에서 함께 업데이트된다(D6).
-- 새로운 `DataAssetColumn`/`DataAssetDetail` 스키마 쌍과 새로운 `GET /api/v1/data-assets/{id}`
-  route가 추가된다.
-- `DataCatalogView.tsx`의 mock-data 주석은 이 ADR을 가리키도록 업데이트된다(이 ADR과 같은 커밋에서
-  함께 수행 — 한 줄짜리 diff). 코드 자체는 Phase 2가 배포될 때까지 mock 데이터에 남는다.
+- `DataAssetColumn`/`DataAssetDetail` schema와 `GET /api/v1/data-assets/{id}` route는 이미 issue #15에서
+  추가됐다. 남은 설계는 현재 detail schema를 hierarchy 계약에 맞춰 발전시킨다.
+- `DataCatalogView.tsx`는 이미 실제 flat 목록/detail endpoint를 사용한다(issue #15). 남은 계층 탐색은
+  이 live caller를 변경하므로 API contract 이전과 함께 배포해야 한다.
 - `dataAssetSchema.name`의 의미가 fully-qualified(오늘의 구현, 예:
   `packages/domain-api/src/schema/dataAsset.ts:9`의 `analytics.orders`)에서 leaf-only(이 ADR의 D2
   예시 `orders`; qualified 형태는 `path` + `name`으로 재구성한다, D8)로 바뀐다. 이는 단순 additive가
-  아니라 기존 필드에 대한 behavior change다 — D6과 마찬가지로 live consumer가 없어 실질 위험은
-  낮다. escape hatch도 D6과 같다: 배포 전에 현재의 fully-qualified `name`에 실제로 통합을 시작한
-  consumer가 나타나면, 필드 의미를 그 자리에서 바꾸는 대신 버전을 올린다(`/api/v2`).
+  아니라 기존 필드에 대한 behavior change다. 현재 UI caller와 다른 소비자에 미치는 영향을 검토하고 D6의
+  동시 이전 및 버전 관리 원칙을 적용한다.
 - 새로운 영속 저장소는 없다. hierarchy는 "second metadata store 없음"이라는 기존 원칙과 일치하게
   완전히 파생된 상태로 유지된다.
 - hierarchy 노드에 대한 authorization 강제(D7)는 이 ADR이 해결하지 않는다 — 실제 사용자 rollout의
