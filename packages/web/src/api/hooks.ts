@@ -7,6 +7,7 @@ import type {
   Event,
   Pipeline,
   PolicyProjection,
+  QueryContext,
   Resource,
   Service,
 } from '@beluga-manager/domain-api/schema';
@@ -146,6 +147,18 @@ export function useDataAsset(id: string | null | undefined) {
     queryFn: async () => {
       if (!id) throw new Error('Data asset id is required');
       return apiGet<DataAssetDetail>(baseUrl, `/api/v1/data-assets/${id}`);
+    },
+    enabled: Boolean(id),
+  });
+}
+
+export function useQueryContext(id: string | null | undefined) {
+  const baseUrl = useApiBaseUrl();
+  return useQuery({
+    queryKey: ['query-context', id],
+    queryFn: async () => {
+      if (!id) throw new Error('Data asset id is required');
+      return apiGet<QueryContext>(baseUrl, `/api/v1/data-assets/${encodeURIComponent(id)}/query-context`);
     },
     enabled: Boolean(id),
   });
