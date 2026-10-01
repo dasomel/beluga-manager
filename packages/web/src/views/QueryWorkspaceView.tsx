@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Check, Copy, ExternalLink, Terminal } from 'lucide-react';
 import { Translations, Locale } from '../i18n/translations';
 import { formatNumber } from '../i18n/format';
@@ -16,22 +16,50 @@ interface QueryWorkspaceViewProps {
   initialAssetId?: string;
 }
 
+// Resolves false (never throws) when the Clipboard API is missing (insecure origin) or rejects.
+export async function copyToClipboard(text: string, clipboard: Pick<Clipboard, 'writeText'> | undefined = globalThis.navigator?.clipboard): Promise<boolean> {
+  if (!clipboard) return false;
+  try {
+    await clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({ t, locale = 'en-US', initialAssetId }) => {
   const assetsQuery = useDataAssets();
   const tableAssets = (assetsQuery.data?.data ?? []).filter((asset) => asset.kind === 'table');
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(initialAssetId ?? null);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
-  const activeAssetId = selectedAssetId ?? tableAssets[0]?.id ?? null;
+  // A stale/unknown id (e.g. handed off for a non-table asset) falls back to the first table.
+  const isKnown = (id: string | null) => id !== null && tableAssets.some((asset) => asset.id === id);
+  const activeAssetId = isKnown(selectedAssetId) ? selectedAssetId : (tableAssets[0]?.id ?? null);
   const contextQuery = useQueryContext(activeAssetId);
   const context = contextQuery.data;
   const trinoUrl = getSafeExternalUrl(context?.trinoUiUrl);
 
-  const copySql = () => {
+  // Reset feedback on asset switch; the timer is cleared on change/unmount.
+  useEffect(() => {
+    setCopied(false);
+    setCopyFailed(false);
+  }, [activeAssetId]);
+  useEffect(() => {
+    if (!copied && !copyFailed) return;
+    const timer = setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [copied, copyFailed]);
+
+  const copySql = async () => {
     if (!context) return;
-    navigator.clipboard.writeText(context.sampleSql);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const ok = await copyToClipboard(context.sampleSql);
+    setCopied(ok);
+    setCopyFailed(!ok);
   };
 
   let body: React.ReactNode;
@@ -66,7 +94,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({ t, local
               className="flex items-center gap-1 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white px-2 py-1 rounded hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors font-bold"
             >
               {copied ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied ? t.common.copied : t.query.copySql}
+              {copied ? t.common.copied : copyFailed ? t.query.copyFailed : t.query.copySql}
             </button>
             {trinoUrl && (
               <a

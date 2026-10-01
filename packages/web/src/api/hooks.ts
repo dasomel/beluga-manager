@@ -152,13 +152,15 @@ export function useDataAsset(id: string | null | undefined) {
   });
 }
 
+export const queryContextPath = (id: string) => `/api/v1/data-assets/${encodeURIComponent(id)}/query-context`;
+
 export function useQueryContext(id: string | null | undefined) {
   const baseUrl = useApiBaseUrl();
   return useQuery({
     queryKey: ['query-context', id],
     queryFn: async () => {
       if (!id) throw new Error('Data asset id is required');
-      return apiGet<QueryContext>(baseUrl, `/api/v1/data-assets/${encodeURIComponent(id)}/query-context`);
+      return apiGet<QueryContext>(baseUrl, queryContextPath(id));
     },
     enabled: Boolean(id),
   });

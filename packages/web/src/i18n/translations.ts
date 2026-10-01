@@ -187,6 +187,7 @@ export interface Translations {
     readOnlyNote: string;
     rowLimit: string;
     copySql: string;
+    copyFailed: string;
     openInTrino: string;
     emptyState: string;
     noTableSelected: string;
@@ -484,6 +485,7 @@ export const translations: Record<Locale, Translations> = {
       readOnlyNote: '읽기 전용 · Manager는 쿼리를 실행하지 않습니다. 복사해 Trino에서 실행하세요.',
       rowLimit: '행 제한',
       copySql: 'SQL 복사',
+      copyFailed: '복사 실패 - 직접 선택해 복사하세요',
       openInTrino: 'Trino에서 열기',
       emptyState: '쿼리할 수 있는 테이블 자산이 없습니다.',
       noTableSelected: '테이블 자산을 선택하세요.',
@@ -774,6 +776,7 @@ export const translations: Record<Locale, Translations> = {
       readOnlyNote: 'Read-only. Manager does not execute queries; copy this and run it in Trino.',
       rowLimit: 'Row limit',
       copySql: 'Copy SQL',
+      copyFailed: 'Copy failed - select the text manually',
       openInTrino: 'Open in Trino',
       emptyState: 'No queryable table assets.',
       noTableSelected: 'Select a table asset.',

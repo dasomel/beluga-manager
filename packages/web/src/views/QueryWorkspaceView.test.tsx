@@ -3,13 +3,14 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DataAsset, QueryContext } from '@beluga-manager/domain-api/schema';
 import { getTranslations } from '../i18n/getTranslations';
-import { QueryWorkspaceView } from './QueryWorkspaceView';
+import { QueryWorkspaceView, copyToClipboard } from './QueryWorkspaceView';
 
 const mocks = vi.hoisted(() => ({
   assets: [] as DataAsset[],
   assetsLoading: false,
   assetsError: false,
   context: undefined as QueryContext | undefined,
+  contexts: {} as Record<string, QueryContext>,
   contextLoading: false,
   contextError: false,
   requestedId: undefined as string | null | undefined,
@@ -25,7 +26,7 @@ vi.mock('../api/hooks', () => ({
   useQueryContext: (id: string | null | undefined) => {
     mocks.requestedId = id;
     return {
-      data: mocks.contextError ? undefined : mocks.context,
+      data: mocks.contextError ? undefined : ((id && mocks.contexts[id]) || mocks.context),
       isLoading: mocks.contextLoading,
       isError: mocks.contextError,
       error: mocks.contextError ? new Error('context 404') : null,
@@ -62,6 +63,7 @@ describe('QueryWorkspaceView', () => {
     mocks.assetsLoading = false;
     mocks.assetsError = false;
     mocks.context = ordersContext;
+    mocks.contexts = {};
     mocks.contextLoading = false;
     mocks.contextError = false;
     mocks.requestedId = undefined;
@@ -142,5 +144,40 @@ describe('QueryWorkspaceView', () => {
     expect(html).toContain(tKo.query.title);
     expect(html).toContain(tKo.query.openInTrino);
     expect(html).toContain(tKo.query.copySql);
+  });
+
+  it('shows the context of the asset named by initialAssetId (distinct data per id)', () => {
+    mocks.assets = [asset('asset-table-orders', 'analytics.orders'), asset('asset-table-users', 'analytics.users')];
+    mocks.contexts = { 'asset-table-users': { ...ordersContext, assetId: 'asset-table-users', table: 'users' } };
+    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-table-users" />);
+    expect(html).toContain('beluga_lake.analytics.users');
+    expect(html).toContain('<option value="asset-table-users" selected');
+  });
+
+  it('falls back to the first table when initialAssetId is not a listed table asset', () => {
+    renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-topic-x" />);
+    expect(mocks.requestedId).toBe('asset-table-orders');
+  });
+});
+
+describe('copyToClipboard', () => {
+  it('resolves true when writeText succeeds', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    await expect(copyToClipboard('SELECT 1', { writeText })).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('SELECT 1');
+  });
+
+  it('resolves false when writeText rejects', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    await expect(copyToClipboard('SELECT 1', { writeText })).resolves.toBe(false);
+  });
+
+  it('resolves false when the Clipboard API is unavailable (insecure origin)', async () => {
+    vi.stubGlobal('navigator', {});
+    try {
+      await expect(copyToClipboard('SELECT 1')).resolves.toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
