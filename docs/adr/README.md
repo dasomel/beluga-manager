@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Index for issue #4 (technology/architecture tracking). Consistency check: the three ADRs below
+Index for issue #4 (technology/architecture tracking). Consistency check: ADR-0001 to ADR-0003
 were cross-read while writing ADR-0002 and ADR-0003 and no conflicts were found between them —
 ADR-0002 builds its npm-workspace/TypeScript decision on ADR-0001's frontend choice, and ADR-0003's
 component set assumes ADR-0001's React selection throughout.
@@ -13,12 +13,12 @@ component set assumes ADR-0001's React selection throughout.
 | [0004](0004-hierarchical-data-asset-api.md) | Hierarchical Data Asset API — Catalog → Schema → Table → Column | Accepted (direction) — design not yet implemented; `GET /api/v1/data-assets` stays flat until Phase 1 ships | 2026-09-24 |
 | [0005](0005-deployment-gitops-integration.md) | Deployment & GitOps Integration with Beluga | Proposed — design direction only; chart/Application not implemented | 2026-10-01 |
 
-## Not yet closed by these three
+## Not yet closed by ADR-0001 to ADR-0003
 
 Issue #4's own completion criterion is "no conflicts between individual ADRs, and a final Architecture
 Diagram + ADR index documented" — the index is this file, and no conflicts were found, but issue #4
 also lists four sibling tracking issues not yet resolved: #23 (Service Integration Adapter Model),
-#24 (Observability Integration), #25 (Deployment & GitOps Integration), and #29 (API Contract &
+#24 (Observability Integration), #25 (Deployment & GitOps Integration; ADR-0005 proposes an answer, still open until Phase 2), and #29 (API Contract &
 Domain Model). Those remain open.
 
 ## Adding a new ADR

@@ -5,8 +5,8 @@
 - **Date**: 2026-10-01
 - **Issue**: [#25 \[ROADMAP\]\[ARCH\] Deployment & GitOps Integration with Beluga](https://github.com/dasomel/beluga-manager/issues/25)
 - **Parent epic**: #1
-- **Related**: [ADR-0002](0002-backend-api-technology.md) (Domain API is a Node.js process on `PORT`,
-  `GET /api/v1/health`), root workspace `AGENTS.md` (Seam: `*.local.beluga.internal` HTTPS 443 boundary)
+- **Related**: [ADR-0002](0002-backend-api-technology.md) (backend stack), `packages/domain-api`
+  (code: reads `PORT`, serves `GET /api/v1/health`), root workspace `AGENTS.md` (Seam: `*.local.beluga.internal` HTTPS 443 boundary)
 - **Deciders**: dasomel
 
 ## Context
@@ -40,11 +40,10 @@ component following Beluga's GitOps pattern, including air-gapped/self-hosted en
 
 ## Decision Outcome
 
-Direction (pending dasomel's acceptance): **Option 1 shape, Beluga-pattern wiring.**
+**Proposed choice: Option 1** (chart here, Application in Beluga), wired per Beluga's pattern. Acceptance by dasomel is pending and tracked as Open Question 1.
 
 - **Chart**: `charts/beluga-manager` in this repository (Helm, no Kustomize; Beluga uses Helm only).
-  Two Deployments (`domain-api`, `web`), Services, ConfigMap; image tags pinned by digest-able
-  value, no `latest`.
+  Two Deployments (`domain-api`, `web`), Services, ConfigMap; image tags pinned, no `latest`.
 - **Registration**: a third `Application` (`beluga-manager.yaml`) added to `beluga/gitops/apps/`,
   same `syncPolicy` as the existing two, destination namespace `beluga-manager`. This is the only
   change Beluga owns; the Manager never edits Beluga's repo or calls ArgoCD write APIs.

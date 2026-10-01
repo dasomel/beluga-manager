@@ -5,8 +5,8 @@
 - **날짜**: 2026-10-01
 - **이슈**: [#25 \[ROADMAP\]\[ARCH\] Deployment & GitOps Integration with Beluga](https://github.com/dasomel/beluga-manager/issues/25)
 - **상위 에픽**: #1
-- **관련**: [ADR-0002](0002-backend-api-technology-ko.md) (Domain API는 `PORT`를 쓰는 Node.js
-  프로세스, `GET /api/v1/health`), 루트 워크스페이스 `AGENTS.md` (Seam: `*.local.beluga.internal`
+- **관련**: [ADR-0002](0002-backend-api-technology-ko.md) (백엔드 스택), `packages/domain-api`
+  (코드: `PORT`를 읽고 `GET /api/v1/health`를 제공), 루트 워크스페이스 `AGENTS.md` (Seam: `*.local.beluga.internal`
   HTTPS 443 경계)
 - **결정자**: dasomel
 
@@ -41,7 +41,7 @@ Beluga의 deployment/IaC를 중복 소유하지 않고, Beluga의 GitOps 패턴�
 
 ## 결정
 
-방향(dasomel의 승인 대기): **선택지 1의 구조, Beluga 패턴의 연결.**
+**제안 선택: 선택지 1**(chart는 여기, Application은 Beluga), Beluga 패턴에 맞춰 연결. dasomel의 승인은 대기 중이며 미결 사항 1로 추적한다.
 
 - **Chart**: 이 저장소의 `charts/beluga-manager`(Helm만 사용, Kustomize 없음. Beluga도 Helm만
   쓴다). Deployment 2개(`domain-api`, `web`), Service, ConfigMap. 이미지 태그는 고정하며 `latest`
