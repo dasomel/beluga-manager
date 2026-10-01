@@ -1,13 +1,14 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import {
+  AdapterTimeoutError,
   DuplicateAdapterError,
   ServiceAdapterRegistry,
   UnsupportedAdapterVersionError,
 } from "../src/adapters/registry.js";
 import { createStubAdapter, createStubRegistry } from "../src/adapters/stubAdapter.js";
 import type { ServiceAdapter } from "../src/adapters/types.js";
-import { listResponseSchema } from "../src/schema/envelope.js";
+import { errorResponseSchema, listResponseSchema } from "../src/schema/envelope.js";
 import { serviceSchema } from "../src/schema/service.js";
 import { services } from "../src/stub-data/services.js";
 
@@ -83,4 +84,69 @@ test("GET /api/v1/services는 어댑터 하나가 실패해도 200이고 해당 
   const all = await app.request("/api/v1/services");
   expect(all.status).toBe(200);
   expect(listSchema.parse(await all.json()).meta.total).toBe(services.length);
+});
+
+test("응답이 없는 어댑터는 주입된 deadline 후 unknown으로 낮아지고 나머지는 영향이 없다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const [first, ...rest] = services.map(createStubAdapter);
+  const hanging: ServiceAdapter = { ...first!, getHealth: () => new Promise(() => {}) };
+  const registry = new ServiceAdapterRegistry([hanging, ...rest], 20);
+
+  const listed = await registry.listServices();
+
+  expect(listed[0]).toMatchObject({ id: "svc-trino", status: "unknown", endpoint: null });
+  expect(listed.slice(1)).toEqual(services.slice(1));
+  expect(console.error).toHaveBeenCalledWith(expect.stringContaining("svc-trino"), expect.any(AdapterTimeoutError));
+});
+
+test("동기적으로 던지는 어댑터도 unknown으로 낮아진다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const sync: ServiceAdapter = {
+    ...createStubAdapter(services[0]!),
+    getVersion: () => {
+      throw new Error("sync boom");
+    },
+  };
+
+  const listed = await new ServiceAdapterRegistry([sync]).listServices();
+
+  expect(listed[0]?.status).toBe("unknown");
+});
+
+test("getService도 실패/타임아웃 시 unknown으로 낮추고 신선한 확인 시각을 주장하지 않는다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const hanging: ServiceAdapter = { ...createStubAdapter(services[0]!), getMetadata: () => new Promise(() => {}) };
+  const svc = await new ServiceAdapterRegistry([hanging], 20).getService("svc-trino");
+
+  expect(svc).toMatchObject({ status: "unknown", lastCheckedAt: "1970-01-01T00:00:00.000Z", staleAfterMs: 0 });
+  expect(() => serviceSchema.parse(svc)).not.toThrow();
+});
+
+test("어댑터가 반환한 여분/충돌 키는 Service에 새지 않고 identity를 덮어쓰지 못한다", async () => {
+  const base = createStubAdapter(services[0]!);
+  const evil: ServiceAdapter = {
+    ...base,
+    getMetadata: async () => ({ ...(await base.getMetadata()), id: "svc-evil", name: "Evil", secret: "x" }) as never,
+    getHealth: async () => ({ ...(await base.getHealth()), type: "kafka", token: "y" }) as never,
+  };
+
+  const svc = await new ServiceAdapterRegistry([evil]).getService("svc-trino");
+
+  expect(svc).toEqual(services[0]);
+  expect(Object.keys(svc!)).not.toContain("secret");
+  expect(Object.keys(svc!)).not.toContain("token");
+});
+
+test("query-context: Trino 어댑터가 실패하면 404가 아니라 503 SERVICE_UNAVAILABLE이다", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const adapters = services.map(createStubAdapter).map((a) => (a.id === "svc-trino" ? failing(a, "getMetadata") : a));
+  const app = createApp(new ServiceAdapterRegistry(adapters));
+
+  const res = await app.request("/api/v1/data-assets/asset-table-orders/query-context");
+  expect(res.status).toBe(503);
+  expect(errorResponseSchema.parse(await res.json()).error.code).toBe("SERVICE_UNAVAILABLE");
+
+  // 알 수 없는 자산은 Trino 상태와 무관하게 여전히 404다.
+  const missing = await app.request("/api/v1/data-assets/nope/query-context");
+  expect(missing.status).toBe(404);
 });
