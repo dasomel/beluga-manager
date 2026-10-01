@@ -4,7 +4,8 @@ import type { DataAssetDetail } from "../schema/dataAsset.js";
 import { errorResponseSchema } from "../schema/envelope.js";
 import { queryContextSchema } from "../schema/queryContext.js";
 import { dataAssetDetails } from "../stub-data/dataAssets.js";
-import { services } from "../stub-data/services.js";
+import type { ServiceAdapterRegistry } from "../adapters/registry.js";
+import { createStubRegistry } from "../adapters/stubAdapter.js";
 
 // Stub 단계의 Trino catalog 이름 — web의 카탈로그 뷰(beluga_lake)와 일치시킨다. 실제
 // Lakekeeper/Trino 어댑터(#41/#42)가 들어오면 upstream 값으로 대체된다.
@@ -38,8 +39,12 @@ const route = createRoute({
   },
 });
 
-export function registerQueryContextRoutes(app: OpenAPIHono, assetDetails: DataAssetDetail[] = dataAssetDetails) {
-  app.openapi(route, (c) => {
+export function registerQueryContextRoutes(
+  app: OpenAPIHono,
+  assetDetails: DataAssetDetail[] = dataAssetDetails,
+  registry: ServiceAdapterRegistry = createStubRegistry(),
+) {
+  app.openapi(route, async (c) => {
     const { id } = c.req.valid("param");
     const asset = assetDetails.find((candidate) => candidate.id === id);
 
@@ -54,7 +59,7 @@ export function registerQueryContextRoutes(app: OpenAPIHono, assetDetails: DataA
     // 이름 규칙은 "schema.table" 두 단계(ADR-0004 이전의 flat 모델). 그 모양이 아니면
     // 추측으로 주소를 만들지 않고 질의 불가로 처리한다.
     const parts = asset.name.split(".");
-    const trino = services.find((svc) => svc.id === TRINO_SERVICE_ID);
+    const trino = await registry.getService(TRINO_SERVICE_ID);
     if (asset.kind !== "table" || parts.length !== 2 || !trino?.endpoint) {
       return c.json(
         { error: { code: "NOT_FOUND" as const, message: `Data asset '${id}' has no Trino query context` } },
