@@ -53,7 +53,7 @@ const testPipelines: Pipeline[] = [
       },
       {
         id: 'dag-triggers-job:d1->j1', source: { kind: 'airflow-dag', id: 'd1' }, target: { kind: 'flink-job', id: 'j1' },
-        relation: 'dag-triggers-job', confidence: 0.3, method: 'ambiguous-name-convention', evidence: ['<script>alert(1)</script>'],
+        relation: 'dag-triggers-job', confidence: 0.6, method: 'name-convention', evidence: ['<script>alert(1)</script>'],
       },
     ],
     correlation: { confidence: 0.97, method: 'declared' },
@@ -135,13 +135,15 @@ describe('PipelinesView', () => {
     expect(html).toContain('k8s-workload-flink');
   });
 
-  it('renders correlation links with relation, confidence, low-confidence marker and escaped evidence', () => {
+  it('renders correlation links with relation, confidence, inferred marker (even at 0.6) and escaped evidence', () => {
     const html = renderToStaticMarkup(<PipelinesView t={tEn} />);
     expect(html).toContain(tEn.pipelines.correlationLinksLabel);
     expect(html).toContain(tEn.pipelines.correlationRelations['topic-feeds-job']);
     expect(html).toContain(tEn.pipelines.correlationRelations['dag-triggers-job']);
     expect(html).toContain('label beluga.io/source-topic=orders.cdc');
     expect(html).toContain(tEn.pipelines.lowConfidence);
+    expect(html).toContain(tEn.pipelines.correlationMethods['name-convention']);
+    expect(html).toContain(tEn.pipelines.correlationMethods['declared-label']);
     expect(html.split(tEn.pipelines.lowConfidence)).toHaveLength(2);
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');

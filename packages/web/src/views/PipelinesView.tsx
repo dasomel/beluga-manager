@@ -7,9 +7,6 @@ import { StatusBadge } from '../components/StatusBadge';
 import { LoadingState, ErrorState } from '../components/QueryState';
 import { getStageExternalUrl } from './pipelineStageLinks';
 
-// 이 값 미만의 링크는 사실이 아니라 추정으로 표시한다(architecture.md 원칙 6).
-const LOW_CONFIDENCE_THRESHOLD = 0.5;
-
 interface PipelinesViewProps {
   t: Translations;
   locale?: Locale;
@@ -155,13 +152,13 @@ export const PipelinesView: React.FC<PipelinesViewProps> = ({ t, locale = 'en-US
                           {t.pipelines.correlationRelations[link.relation]}
                         </span>
                         <span className="text-xs font-mono font-bold text-slate-900 dark:text-white">
-                          {link.method} · {Math.round(link.confidence * 100)}%
+                          {t.pipelines.correlationMethods[link.method]} · {Math.round(link.confidence * 100)}%
                         </span>
                       </div>
                       <div className="text-sm font-mono font-bold text-slate-900 dark:text-white">
                         {t.pipelines.correlationKinds[link.source.kind]} {link.source.id} → {t.pipelines.correlationKinds[link.target.kind]} {link.target.id}
                       </div>
-                      {link.confidence < LOW_CONFIDENCE_THRESHOLD && (
+                      {link.method !== 'declared-label' && (
                         <p className="mt-1 text-xs font-semibold text-amber-700 dark:text-amber-400">{t.pipelines.lowConfidence}</p>
                       )}
                       {link.evidence.length > 0 && (

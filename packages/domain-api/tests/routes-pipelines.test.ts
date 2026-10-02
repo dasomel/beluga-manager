@@ -122,8 +122,21 @@ test("correlationLinks 없이 입력된 Pipeline은 빈 배열로 기본값을 �
   expect(parsed.correlationLinks).toEqual([]);
 });
 
-test("POST는 허용되지 않는다(correlationLinks는 읽기 전용)", async () => {
+test("모든 correlation link는 evidence를 갖고 id가 유일하며 endpoint가 relation의 kind와 일치한다", async () => {
   const app = createApp();
-  const res = await app.request("/api/v1/pipelines", { method: "POST", body: "{}" });
-  expect([404, 405]).toContain(res.status);
+  const body = pipelineListResponseSchema.parse(await (await app.request("/api/v1/pipelines")).json());
+  const kinds = {
+    "topic-feeds-job": ["kafka-topic", "flink-job"],
+    "job-writes-table": ["flink-job", "iceberg-table"],
+    "table-served-by-catalog": ["iceberg-table", "trino-catalog"],
+    "dag-triggers-job": ["airflow-dag", "flink-job"],
+  } as const;
+  for (const pipeline of body.data) {
+    const ids = pipeline.correlationLinks.map((link) => link.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const link of pipeline.correlationLinks) {
+      expect(link.evidence.length).toBeGreaterThan(0);
+      expect([link.source.kind, link.target.kind]).toEqual(kinds[link.relation]);
+    }
+  }
 });

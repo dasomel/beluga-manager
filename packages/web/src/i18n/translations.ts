@@ -98,6 +98,7 @@ export interface Translations {
     noCorrelationLinks: string;
     lowConfidence: string;
     evidenceLabel: string;
+    correlationMethods: Record<'declared-label' | 'name-convention' | 'ambiguous-name-convention', string>;
     correlationKinds: Record<'kafka-topic' | 'flink-job' | 'iceberg-table' | 'trino-catalog' | 'airflow-dag', string>;
     correlationRelations: Record<'topic-feeds-job' | 'job-writes-table' | 'table-served-by-catalog' | 'dag-triggers-job', string>;
   };
@@ -409,8 +410,9 @@ export const translations: Record<Locale, Translations> = {
       runResults: { running: '실행 중', succeeded: '성공', failed: '실패', unknown: '알 수 없음' },
       correlationLinksLabel: '서비스 간 상관관계 링크',
       noCorrelationLinks: '식별된 상관관계 링크가 없습니다',
-      lowConfidence: '낮은 신뢰도 (추정)',
+      lowConfidence: '추정된 링크 (사실 아님)',
       evidenceLabel: '근거',
+      correlationMethods: { 'declared-label': '선언됨', 'name-convention': '이름 규약 추정', 'ambiguous-name-convention': '모호한 이름 규약 추정' },
       correlationKinds: { 'kafka-topic': 'Kafka 토픽', 'flink-job': 'Flink 작업', 'iceberg-table': 'Iceberg 테이블', 'trino-catalog': 'Trino 카탈로그', 'airflow-dag': 'Airflow DAG' },
       correlationRelations: { 'topic-feeds-job': '토픽 → 작업 입력', 'job-writes-table': '작업 → 테이블 적재', 'table-served-by-catalog': '테이블 → 카탈로그 서빙', 'dag-triggers-job': 'DAG → 작업 실행' },
     },
@@ -706,8 +708,9 @@ export const translations: Record<Locale, Translations> = {
       runResults: { running: 'Running', succeeded: 'Succeeded', failed: 'Failed', unknown: 'Unknown' },
       correlationLinksLabel: 'Cross-service correlation links',
       noCorrelationLinks: 'No correlation links identified',
-      lowConfidence: 'Low confidence (inferred)',
+      lowConfidence: 'Inferred link (not a fact)',
       evidenceLabel: 'Evidence',
+      correlationMethods: { 'declared-label': 'Declared', 'name-convention': 'Inferred from name', 'ambiguous-name-convention': 'Inferred from name (ambiguous)' },
       correlationKinds: { 'kafka-topic': 'Kafka topic', 'flink-job': 'Flink job', 'iceberg-table': 'Iceberg table', 'trino-catalog': 'Trino catalog', 'airflow-dag': 'Airflow DAG' },
       correlationRelations: { 'topic-feeds-job': 'Topic feeds job', 'job-writes-table': 'Job writes table', 'table-served-by-catalog': 'Table served by catalog', 'dag-triggers-job': 'DAG triggers job' },
     },
