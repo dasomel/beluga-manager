@@ -65,3 +65,32 @@ test('식별자의 큰따옴표는 이중화되어 SQL 인용을 탈출할 수 �
   const body = queryContextSchema.parse(await res.json());
   expect(body.sampleSql).toBe('SELECT * FROM "beluga_lake"."sch""ema"."ta""ble; DROP TABLE x --" LIMIT 20');
 });
+
+test("구조화된 catalog/namespace가 있으면 name 파싱 대신 그것으로 주소를 만든다", async () => {
+  const app = new OpenAPIHono();
+  registerQueryContextRoutes(app, [
+    {
+      id: "asset-table-x",
+      name: "orders",
+      kind: "table",
+      serviceId: "svc-iceberg",
+      status: "healthy",
+      catalog: "other_cat",
+      namespace: ["sales"],
+    },
+    {
+      id: "asset-table-deep",
+      name: "orders",
+      kind: "table",
+      serviceId: "svc-iceberg",
+      status: "healthy",
+      catalog: "other_cat",
+      namespace: ["sales", "raw"],
+    },
+  ]);
+  const ok = queryContextSchema.parse(await (await app.request("/api/v1/data-assets/asset-table-x/query-context")).json());
+  expect(ok).toMatchObject({ catalog: "other_cat", schema: "sales", table: "orders" });
+  expect(ok.sampleSql).toBe('SELECT * FROM "other_cat"."sales"."orders" LIMIT 20');
+  // 다단계 namespace는 Trino schema로 추측하지 않고 질의 불가(404)로 처리한다.
+  expect((await app.request("/api/v1/data-assets/asset-table-deep/query-context")).status).toBe(404);
+});
