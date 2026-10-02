@@ -74,6 +74,33 @@ opens the resource list with that item highlighted. A resource opens its logs in
 `logsUrl` is present; fixtures leave it null because no observability endpoint is configured.
 Manager does not store logs. These are stub fixtures, not live Kubernetes discovery.
 
+## Containerized Local Stack (Docker / Podman)
+
+`compose.yaml` runs the Domain API and the web console as containers, using the existing
+`packages/*/Dockerfile` images. No Beluga platform, credentials, or secrets are needed.
+
+```bash
+make dev-up      # build images, start, and wait until both healthchecks pass
+make dev-down    # stop and remove containers and the network
+
+# Podman: make dev-up COMPOSE="podman compose"   (or COMPOSE=podman-compose)
+```
+
+| Service | URL (host, loopback only) | Healthcheck |
+|---------|---------------------------|-------------|
+| web (nginx, uid 101) | `http://localhost:5180` | `GET /` |
+| domain-api (node, uid 1000) | `http://localhost:8787` (`/api/v1/health`, `/api/v1/docs`) | `GET /api/v1/health` |
+
+- **Ports are fixed**: the web bundle ships `apiBaseUrl: http://localhost:8787` and the API's CORS
+  allows only `http://localhost:5180`, so the host ports must stay 5180 and 8787 (free them first).
+- **Environment**: only `PORT` (API) is read; there are no secrets or `.env` files.
+- **Hardening**: both containers run non-root with a read-only root filesystem, all capabilities
+  dropped, and `no-new-privileges`.
+- **Mock vs. real**: the Domain API always uses the stub adapter registry and the fixtures in
+  `packages/domain-api/src/stub-data/`. There is no real-upstream mode yet, so this stack proves
+  UI/API behavior against fixtures only, not integration with a running Beluga platform.
+- After code changes run `make dev-up` again to rebuild; for hot reload use the `npm run dev` flow above.
+
 ## Local Verification
 
 Run the same baseline locally and in CI:
