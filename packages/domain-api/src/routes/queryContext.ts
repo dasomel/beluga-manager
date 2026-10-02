@@ -45,6 +45,11 @@ const route = createRoute({
   },
 });
 
+function stripNamespacePrefix(name: string, namespace: string[]): string {
+  const prefix = namespace.length > 0 ? `${namespace.join(".")}.` : "";
+  return prefix !== "" && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+
 export function registerQueryContextRoutes(
   app: OpenAPIHono,
   assetDetails: DataAssetDetail[] = dataAssetDetails,
@@ -64,7 +69,9 @@ export function registerQueryContextRoutes(
     // 추측으로 주소를 만들지 않고 질의 불가로 처리한다.
     // 구조화 필드(catalog/namespace, ADR-0004 D2/D8)가 있으면 그것을 우선 쓰고 없을 때만 name을 쪼갠다.
     // namespace가 한 단계가 아니면(다단계 Iceberg namespace) Trino schema로 추측하지 않는다.
-    const parts = asset.namespace ? [...asset.namespace, asset.name.split(".").pop() ?? ""] : asset.name.split(".");
+    // name은 flat 호환상 "ns.table" 이거나 leaf일 수 있으므로, namespace 접두사만 떼어 낸 나머지 전체가
+    // table 이름이다(점이 든 "orders.v2"도 보존).
+    const parts = asset.namespace ? [...asset.namespace, stripNamespacePrefix(asset.name, asset.namespace)] : asset.name.split(".");
     if (asset.kind !== "table" || parts.length !== 2) {
       return c.json(
         { error: { code: "NOT_FOUND" as const, message: `Data asset '${id}' has no Trino query context` } },

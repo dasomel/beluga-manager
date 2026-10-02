@@ -2,7 +2,7 @@ import { createRoute, type OpenAPIHono, z } from "@hono/zod-openapi";
 import { buildListEnvelope, healthWarning } from "../lib/envelope.js";
 import { internalErrorResponse } from "../lib/errorResponses.js";
 import { paginate } from "../lib/pagination.js";
-import { dataAssetDetailSchema, dataAssetSchema, type DataAssetDetail } from "../schema/dataAsset.js";
+import { dataAssetDetailSchema, dataAssetSchema, toDataAsset, type DataAssetDetail } from "../schema/dataAsset.js";
 import { errorResponseSchema, listResponseSchema } from "../schema/envelope.js";
 import { dataAssetListQuerySchema } from "../schema/query.js";
 import { dataAssetDetails } from "../stub-data/dataAssets.js";
@@ -61,11 +61,7 @@ export function registerDataAssetRoutes(
 ) {
   app.openapi(listRoute, (c) => {
     const { page, pageSize, status, kind, parentId } = c.req.valid("query");
-    // 상세 전용 필드(columns/location/format/metadataSummary/childCount)는 목록에서 제외한다.
-    const listItems = assetDetails.map(
-      ({ columns: _columns, location: _location, format: _format, metadataSummary: _summary, childCount: _count, ...asset }) =>
-        asset,
-    );
+    const listItems = assetDetails.map(toDataAsset);
     // parentId가 알 수 없는 id면 404가 아니라 빈 목록이다(ADR-0004 test plan).
     const filtered = listItems.filter(
       (asset) =>

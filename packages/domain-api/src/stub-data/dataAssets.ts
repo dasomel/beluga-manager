@@ -4,7 +4,7 @@
 import { deriveAssetId } from "../lib/assetId.js";
 import {
   dataAssetDetailSchema,
-  dataAssetSchema,
+  toDataAsset,
   type DataAsset,
   type DataAssetDetail,
 } from "../schema/dataAsset.js";
@@ -102,9 +102,4 @@ export const dataAssetDetails: DataAssetDetail[] = dataAssetDetailSchema.array()
   },
 ] satisfies DataAssetDetail[]);
 
-export const dataAssets: DataAsset[] = dataAssetSchema.array().parse(
-  dataAssetDetails.map(
-    ({ columns: _columns, location: _location, format: _format, metadataSummary: _summary, childCount: _count, ...asset }) =>
-      asset,
-  ),
-);
+export const dataAssets: DataAsset[] = dataAssetDetails.map(toDataAsset);

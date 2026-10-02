@@ -107,3 +107,8 @@ export const dataAssetDetailSchema = dataAssetSchema
 export type DataAssetColumn = z.infer<typeof dataAssetColumnSchema>;
 export type DataAssetMetadataSummary = z.infer<typeof dataAssetMetadataSummarySchema>;
 export type DataAssetDetail = z.infer<typeof dataAssetDetailSchema>;
+
+// 목록 항목은 dataAssetSchema 필드만 allowlist로 투영한다 — 상세 전용 필드가 추가돼도 목록에 새지 않는다.
+export function toDataAsset(detail: DataAssetDetail): DataAsset {
+  return dataAssetSchema.parse(detail);
+}
