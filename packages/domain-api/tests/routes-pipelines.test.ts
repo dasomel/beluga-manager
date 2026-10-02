@@ -99,3 +99,31 @@ test("lastRun이 null이거나 finishedAt이 null인 running job은 스키마를
   });
   expect(running.lastRun?.finishedAt).toBeNull();
 });
+
+test("correlationLinks는 읽기 전용으로 노출되고 4개 relation 쌍과 낮은 확신도 링크를 포함한다", async () => {
+  const app = createApp();
+  const body = pipelineListResponseSchema.parse(await (await app.request("/api/v1/pipelines")).json());
+  const links = body.data.flatMap((pipeline) => pipeline.correlationLinks);
+
+  expect(new Set(links.map((link) => link.relation))).toEqual(
+    new Set(["topic-feeds-job", "job-writes-table", "table-served-by-catalog", "dag-triggers-job"]),
+  );
+  expect(links.some((link) => link.confidence < 0.5 && link.method === "ambiguous-name-convention")).toBe(true);
+  expect(links.some((link) => link.method === "declared-label" && link.confidence >= 0.9)).toBe(true);
+  // 링크가 없는 파이프라인(unknown)은 빈 배열로 하위 호환.
+  expect(body.data.find((pipeline) => pipeline.id === "pl-cluster-observability")?.correlationLinks).toEqual([]);
+});
+
+test("correlationLinks 없이 입력된 Pipeline은 빈 배열로 기본값을 갖는다", () => {
+  const parsed = pipelineSchema.parse({
+    id: "pl-x", name: "x", stages: [], status: "healthy",
+    correlation: { confidence: 1, method: "declared" }, lastUpdatedAt: "2026-09-21T00:00:00.000Z",
+  });
+  expect(parsed.correlationLinks).toEqual([]);
+});
+
+test("POST는 허용되지 않는다(correlationLinks는 읽기 전용)", async () => {
+  const app = createApp();
+  const res = await app.request("/api/v1/pipelines", { method: "POST", body: "{}" });
+  expect([404, 405]).toContain(res.status);
+});
