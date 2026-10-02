@@ -17,11 +17,9 @@ const lakehouseEntities: CorrelationEntity[] = [
 
 const batchEntities: CorrelationEntity[] = [
   // 선언 없음: 이름 규약만으로 추정되는 DAG -> job 링크(모호하면 확신도 하향).
-  { kind: "airflow-dag", id: "dag-orders-report", name: "orders_report_dag", labels: {} },
-  { kind: "flink-job", id: "job-flink-orders-sync", name: "orders-sync", labels: {} },
+  { kind: "airflow-dag", id: "job-airflow-orders-report", name: "orders_report_dag", labels: {} },
+  { kind: "flink-job", id: "job-flink-orders-report", name: "orders-report", labels: {} },
   { kind: "flink-job", id: "job-flink-orders-backfill", name: "orders-backfill", labels: {} },
-  // 어떤 DAG/job과도 키가 맞지 않는 table -> 링크 없음(unknown).
-  { kind: "iceberg-table", id: "table-staging-clicks", name: "staging.clicks", labels: {} },
 ];
 
 export const pipelines: Pipeline[] = pipelineSchema.array().parse([
@@ -71,14 +69,42 @@ export const pipelines: Pipeline[] = pipelineSchema.array().parse([
     name: "Airflow Batch Reporting",
     stages: [
       { serviceId: "svc-airflow", serviceType: "airflow", status: "healthy", detail: null },
+      { serviceId: "svc-flink", serviceType: "flink", status: "healthy", detail: null },
       { serviceId: "svc-trino", serviceType: "trino", status: "healthy", detail: null },
     ],
     jobs: [
       {
-        id: "job-airflow-daily-report",
-        name: "daily_reporting_dag",
+        id: "job-airflow-orders-report",
+        name: "orders_report_dag",
         kind: "airflow",
         serviceId: "svc-airflow",
+        lastRun: {
+          result: "succeeded",
+          startedAt: "2026-09-21T05:00:00.000Z",
+          finishedAt: "2026-09-21T05:12:00.000Z",
+          failureReason: null,
+        },
+        relatedResourceIds: [],
+      },
+      // D5: correlate only endpoints exposed by this Pipeline; extra stub jobs keep the API graph reviewable until adapter inventory replaces them.
+      {
+        id: "job-flink-orders-report",
+        name: "orders-report",
+        kind: "flink",
+        serviceId: "svc-flink",
+        lastRun: {
+          result: "succeeded",
+          startedAt: "2026-09-21T05:00:00.000Z",
+          finishedAt: "2026-09-21T05:12:00.000Z",
+          failureReason: null,
+        },
+        relatedResourceIds: [],
+      },
+      {
+        id: "job-flink-orders-backfill",
+        name: "orders-backfill",
+        kind: "flink",
+        serviceId: "svc-flink",
         lastRun: {
           result: "succeeded",
           startedAt: "2026-09-21T05:00:00.000Z",

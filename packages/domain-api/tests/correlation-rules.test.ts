@@ -77,6 +77,8 @@ test("양쪽 모호성: 두 topic이 한 job에 매칭되면 둘 다 0.3(0.6 링
 test("generic 접두어(prod/raw)만 같은 자산은 링크하지 않는다", () => {
   expect(correlate([topic("prod.payments"), job("prod-orders-sync")])).toEqual([]);
   expect(correlate([topic("raw.clicks"), job("raw-orders")])).toEqual([]);
+  expect(correlate([table("prod.orders"), catalog("prod")])).toEqual([]);
+  expect(correlate([table("raw.clicks"), catalog("raw")])).toEqual([]);
   // 의미 있는 토큰이 같으면 접두어가 달라도 매칭된다.
   expect(correlate([topic("prod.orders"), job("raw-orders-sync")])).toHaveLength(1);
 });

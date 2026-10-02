@@ -140,3 +140,20 @@ test("모든 correlation link는 evidence를 갖고 id가 유일하며 endpoint�
     }
   }
 });
+
+test("job correlation endpoint는 같은 Pipeline의 jobs에 존재한다", async () => {
+  const app = createApp();
+  const body = pipelineListResponseSchema.parse(await (await app.request("/api/v1/pipelines")).json());
+  const jobKinds = { "flink-job": "flink", "airflow-dag": "airflow" } as const;
+
+  for (const pipeline of body.data) {
+    for (const link of pipeline.correlationLinks) {
+      for (const endpoint of [link.source, link.target]) {
+        if (endpoint.kind in jobKinds) {
+          const kind = jobKinds[endpoint.kind as keyof typeof jobKinds];
+          expect(pipeline.jobs.some((job) => job.id === endpoint.id && job.kind === kind)).toBe(true);
+        }
+      }
+    }
+  }
+});

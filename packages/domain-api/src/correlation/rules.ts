@@ -80,7 +80,8 @@ const RULES: readonly Rule[] = [
     declaredOn: "source",
     labelKey: "beluga.io/trino-catalog",
     // table 이름의 첫 세그먼트가 catalog 이름과 같으면 규약 일치.
-    key: (entity) => (entity.kind === "iceberg-table" ? entity.name.toLowerCase().split(".")[0] ?? "" : entity.name.toLowerCase()),
+    // D6: generic-only namespace labels cannot infer a catalog link; explicit labels remain authoritative.
+    key: (entity) => firstSignificantToken(entity.kind === "iceberg-table" ? entity.name.split(".")[0] ?? "" : entity.name),
   },
   {
     relation: "dag-triggers-job",
