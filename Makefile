@@ -2,7 +2,7 @@
 
 NODE ?= node
 PYTHON ?= python3
-# Override with COMPOSE="podman compose" (or podman-compose) to use Podman.
+# Override with COMPOSE="podman compose" (v2 provider) to use Podman.
 COMPOSE ?= docker compose
 
 lint:
