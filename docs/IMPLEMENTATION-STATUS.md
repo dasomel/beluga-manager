@@ -25,7 +25,8 @@ This file records behavior implemented on the default branch and separates it fr
   artefacts. It intentionally excludes raw compiled text, credentials, and secrets. A test compiles the
   checked-in fixture with the real policy compiler to detect projection drift; this is not a live
   Keycloak or OPA integration.
-- Read-only Data Asset API and table detail panel (issues #15/#36): exposes table columns, nullability, location, format, metadata summary, and query context from local fixtures. Merged PR #120 adds `catalog` kind, optional `catalog`/`namespace`/`parentId`/`path`, `?parentId=` filtering, a derived-id helper, and partition-column markers while retaining the flat-list default and existing IDs. The hierarchy and Query context still use fixtures; this is not a live Iceberg/Lakekeeper or Trino integration.
+- Read-only Data Asset API and table detail panel (issues #15/#36): `DataCatalogView` fetches asset lists and selected table details through the Domain API and displays table columns, nullability, location, format, and metadata summary from local fixtures. Merged PR #120 adds `catalog` kind, optional `catalog`/`namespace`/`parentId`/`path`, `?parentId=` filtering, a derived-id helper, and partition-column markers while retaining the flat-list default and existing IDs.
+- Query context is a separate Domain API endpoint (`GET /api/v1/data-assets/{id}/query-context`): DataCatalogView hands only the selected asset ID to Query Workspace, which fetches the query context and starter SQL. The endpoint uses fixture assets and a stub service registry; it does not query live Trino.
 - Pipeline correlation contract (issue #35): merged PR #121 adds typed `correlationLinks` to Pipeline responses, deterministic declared-label/name-convention rules with confidence/evidence, and read-only PipelinesView rendering. Current links are calculated from checked-in stub inventories; they are not discovered from live Kafka, Flink, Iceberg/Lakekeeper, Trino, or Airflow APIs.
 - Overview Dashboard and Services Catalog (issues #13/#14): KPI cards include Iceberg table assets, active workloads (healthy or degraded `Workload` resources; a resource proxy, not a distinct Job count), and monitored resource count with the number reporting CPU or memory usage. Resource KPIs use `GET /api/v1/resources` and drill down to Operations. The usage summary counts resources with string usage fields; it does not calculate aggregate CPU or storage quantities. Superset is registered with version 6.1.0 per `beluga/VERSIONS.md`.
 - A fault-isolated execution boundary for `DecisionProvider` (`src/decision/isolatedProvider.ts`,
@@ -67,9 +68,10 @@ This file records behavior implemented on the default branch and separates it fr
 - Issue #36 / ADR-0004 hierarchy work is at the API/schema/stub-fixture slice. Remaining work includes
   lazy catalog/schema navigation in `DataCatalogView` (which still shows a flat table list and fixed
   catalog labels), adapters mapping authoritative Lakekeeper/Iceberg and Trino metadata, and evidence
-  for that source-to-Domain-API path. `childCount` remains `null` until node-level OPA filtering exists;
-  ADR-0004 treats that filtering as a gate for rollout to real users. Superset dataset context is
-  optional in issue #36.
+  for that source-to-Domain-API path. The separate Query Workspace query-context route also still uses
+  fixture assets and a stub service registry. `childCount` remains `null` until node-level OPA filtering
+  exists; ADR-0004 treats that filtering as a gate for rollout to real users. Superset dataset context
+  is optional in issue #36.
 - The frontend has no data grid, DAG/topology graph, or SQL editor component yet (issues #16-#18);
   current views are Tailwind-styled shells, not the specialist components ADR-0003 selected.
 - Architecture (topology) navigation section (issue #18) does not exist yet — see
