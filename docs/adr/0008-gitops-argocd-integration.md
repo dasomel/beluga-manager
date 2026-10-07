@@ -1,248 +1,230 @@
 # ADR-0008: GitOps Integration with ArgoCD — Deployment & Synchronization Visibility
 
 - **Status**: Proposed — design proposal; no live ArgoCD adapter, write API, or sync trigger is implemented by this ADR.
-  Note on numbering: ADR-0005 was allocated to Beluga Manager container packaging & deployment architecture (PR #113); ADR-0006 covers Safe Actions (PR #134, issue #21); ADR-0007 covers Observability Integration (PR #135, issue #24); this GitOps proposal is numbered ADR-0008 (issue #25).
+  Note on numbering: ADR-0005 is Deployment & GitOps Integration (PR #113); ADR-0006 is Safe Actions (PR #134, issue #21); ADR-0007 is Observability Integration (PR #135, issue #24); this proposal is ADR-0008 (issue #25).
 - **Date**: 2026-10-07
 - **Issue**: [#25 [ROADMAP][ARCH] Deployment & GitOps Integration with Beluga](https://github.com/dasomel/beluga-manager/issues/25)
 - **Parent epic**: #1
-- **Related**: [ADR-0002](0002-backend-api-technology.md) (Domain API, Hono), [ADR-0005](0005-deployment-gitops-integration.md) (Deployment packaging & image architecture), `AGENTS.md` (read-first principle, boundary between upstream OSS and unified domain), `docs/architecture.md` (Section 5 Ownership Boundaries, Section 6 Operations & Services Views), `beluga/docs/mistakes-log.md` (stuck sync operations, hook race conditions, post-reboot Flink job loss, selfHeal rollback of manual edits).
+- **Related**: [ADR-0002](0002-backend-api-technology.md) (Domain API, Hono), [ADR-0005](0005-deployment-gitops-integration.md) (see "Relationship to ADR-0005"), ADR-0006 (Safe Actions, section 0 hard prerequisite and section 2a Flink analysis), `AGENTS.md` (read-first principle, boundary between upstream OSS and unified domain), `docs/architecture.md` (headings "Design Principles" — principles 3 and 6 — and "Ownership Boundaries"; the headings are un-numbered and there is no Operations & Services section in that file), `beluga/docs/mistakes-log.md` (cited by date, see Current state).
 - **Deciders**: dasomel
+
+Conventions: **Current state** lists only observed facts (file:line or a command that was run; evidence date 2026-10-07). **Proposal** is design intent. Every number (cache TTL, timeout, threshold) is labelled *Proposed*. External facts carry an official URL opened on 2026-10-07, or are marked *not verified*.
+
+## Relationship to ADR-0005
+
+ADR-0005 and this ADR both come from issue #25 and must not duplicate each other.
+- **ADR-0005 owns**: how Beluga Manager itself is packaged and deployed through Beluga's GitOps (chart location, the `Application` registration in the Beluga repo, image pinning, upgrade/rollback by Git revert). It is still *Proposed* and its Open Question 1 (chart location) is undecided. Its "Read-only boundary" bullet and Open Question 4 ("whether a read-only ArgoCD status adapter is in MVP scope") explicitly defer the topic of this ADR.
+- **This ADR owns**: how the Manager *observes* the GitOps plane (read-only ArgoCD status adapter, domain mapping, operational guardrails, and the security contract to ArgoCD). It does not decide chart placement, `Application` registration or image handling, and it does not change ADR-0005's decisions. If ADR-0005 is accepted, the Manager's own `Application` simply becomes one more application the adapter can show; nothing here depends on that.
+- ADR-0005's Open Question 4 is *answered here as a proposal* (yes, as a later phase, read-only, after the prerequisites below); acceptance is dasomel's decision.
 
 ## Context
 
-Beluga owns data platform infrastructure provisioning and GitOps synchronization using an ArgoCD app-of-apps architecture (`beluga/gitops/apps/app-of-apps.yaml`, `beluga-root`). The root application continuously reconciles two primary platform applications from `https://github.com/dasomel/beluga.git`:
-1. `beluga-platform`: Deploys baseline system infrastructure (MetalLB, APISIX gateway, cert-manager, Keycloak, OpenLDAP, OPA, OpenFGA).
-2. `beluga-data`: Deploys the Lakehouse data engines (SeaweedFS S3, CloudNativePG, Strimzi Kafka, Lakekeeper Iceberg REST catalog, Flink Operator, Trino, Airflow, Superset).
+### Current state (observed)
 
-Both applications are configured with automated synchronization (`automated: { prune: true, selfHeal: true }`) and server-side apply (`ServerSideApply=true`). In [ADR-0005](0005-deployment-gitops-integration.md), the packaging and containerization of Beluga Manager itself was decided (Phase 1 container images shipped in `37e8507`; Option 1 proposed for chart placement).
+| Fact | Evidence |
+|---|---|
+| Beluga runs an ArgoCD app-of-apps: `beluga-root` renders the `beluga-platform` and `beluga-data` Applications from `https://github.com/dasomel/beluga.git`; all three have `automated: {prune: true, selfHeal: true}`. | Beluga `gitops/apps/app-of-apps.yaml:1-21`, `gitops/apps/beluga-data.yaml:19-22`, `gitops/apps/beluga-platform.yaml:21`; live `kubectl -n argocd get applications.argoproj.io` -> three apps. |
+| **ArgoCD is v3.5.0** (not 2.13.0 as an earlier draft said): `VERSIONS.md` row, bootstrap script, and the running image agree. | Beluga `VERSIONS.md:19` ("ArgoCD \| 3.5.0"); `scripts/gitops/01-argocd-bootstrap.sh:19,23` (`install.yaml` of `v3.5.0`); live `kubectl -n argocd get deploy argocd-server -o jsonpath='{.spec.template.spec.containers[0].image}'` -> `quay.io/argoproj/argocd:v3.5.0`. |
+| Live status of the three apps: all `Synced` / `Healthy`, last operation `Succeeded`; `spec.source.targetRevision` is `HEAD` (not a branch name); `.status.sync.revision` is a full commit SHA (`ce493324…`). | `kubectl -n argocd get application <name> -o jsonpath='{.status.sync.status} {.status.health.status} {.status.operationState.phase} {.spec.source.targetRevision} {.status.sync.revision}'` (read-only, 2026-10-07). |
+| Each Application lists its managed resources with only `kind/name/namespace/status/version` (no manifest content). | Live `kubectl -n argocd get application beluga-data -o jsonpath='{.status.resources[0]}'` -> `{"kind":"ConfigMap","name":"trino-access-control","namespace":"analytics","status":"Synced","version":"v1"}`. |
+| **ArgoCD configuration is not managed by the Beluga GitOps charts.** ArgoCD is installed by a bootstrap script applying the upstream `install.yaml`, then patching `argocd-cmd-params-cm` (`server.insecure: "true"`; APISIX terminates TLS and forwards plain HTTP to `argocd-server:80`). No ArgoCD/RBAC manifest exists under `gitops/`. | Beluga `scripts/gitops/01-argocd-bootstrap.sh:19-29`; `git ls-tree -r --name-only refs/remotes/origin/main gitops \| grep -i "argocd\|rbac"` -> no output; live `kubectl -n argocd get svc argocd-server` -> ports `80/TCP,443/TCP`. |
+| Live `argocd-rbac-cm` has **empty data** (no custom policy, no `policy.csv`); no dedicated read-only account or role exists. | `kubectl -n argocd get cm argocd-rbac-cm -o jsonpath='{.data}'` -> empty. |
+| The domain API has **no authentication middleware**. | `docs/IMPLEMENTATION-STATUS.md:30` ("the app has no auth middleware"); `packages/domain-api/src/app.ts:50-56` registers only CORS (origin `http://localhost:5180`). |
+| There is **no `Deployment` or GitOps schema** in the domain API; the stub Service ids that exist are `svc-trino`, `svc-airflow`, `svc-iceberg`, `svc-kafka`, `svc-flink`, `svc-superset`, `svc-kubernetes`, `svc-observability`. **`svc-platform` does not exist.** | `packages/domain-api/src/schema/` (no deployment/gitops file); `packages/domain-api/src/stub-data/services.ts:9-129` (`id:` fields); `git grep -n "svc-platform" -- packages` -> no hit. A read-only Flink adapter exists on `main` (`packages/domain-api/src/adapters/flink/`, PR #132). |
+| ArgoCD host `argocd.local.beluga.internal` is in the Beluga domain registry. | Beluga `AGENTS.md:16-18`. |
 
-However, issue #25 also requires defining the **operational integration between Beluga Manager and the GitOps plane**. Operators and engineers need visibility into deployment status, configuration drift, and application health directly within Beluga Manager without requiring direct `kubectl` access or cluster-admin logins to the ArgoCD dashboard. Furthermore, the operational history recorded in `beluga/docs/mistakes-log.md` documents recurring failure modes (stuck sync hooks, post-reboot Flink job losses, SSA merge deadlocks, and silent `selfHeal` rollbacks) that must be addressed by this integration contract.
+Operational history in `beluga/docs/mistakes-log.md`. The log has **no row numbers**; entries are identified by the date column. File:line below refer to `refs/remotes/origin/main` of the beluga repo as read on 2026-10-07 and may drift.
 
-### Upstream Verification & Authoritative Standards
-- **ArgoCD 2.13.0** (verified in `beluga/VERSIONS.md`): Reachable at `https://argocd.local.beluga.internal`.
-- **Live Cluster Status**: Read-only cluster inspection confirms 3 running applications in namespace `argocd`: `beluga-root` (Synced/Healthy), `beluga-platform` (Synced/Healthy), `beluga-data` (Synced/Healthy).
-- **ArgoCD REST API**: [ArgoCD API Specification](https://argo-cd.readthedocs.io/en/stable/operator-manual/api/) (access date: 2026-10-07) defines `GET /api/v1/applications` and `GET /api/v1/applications/{name}` returning application tree, health status, sync status, operation state, and target/live revisions.
-- **ArgoCD RBAC Policy**: [ArgoCD RBAC Documentation](https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/) (access date: 2026-10-07) supports declarative role definitions via `argocd-rbac-cm` ConfigMap.
-- **ArgoCD Resource Hooks**: [ArgoCD Resource Hooks Documentation](https://argo-cd.readthedocs.io/en/stable/user-guide/resource_hooks/) (access date: 2026-10-07) defines sync hooks (`PreSync`, `Sync`, `PostSync`) and delete policies (`BeforeHookCreation`, `HookSucceeded`).
+| Date / line | Quoted excerpt (translated from the Korean entry) | Relevance |
+|---|---|---|
+| 2026-08-25, line 49 (gitops) | "`beluga-platform`/`beluga-data` … `selfHeal: true` … editing directly with `kubectl apply` … ArgoCD **silently reverts to the origin/main state within a few minutes**" | Out-of-band edits are reverted; the interval is "a few minutes", not a measured number. |
+| 2026-08-26, line 53 (harness) | An orchestrator manually `kubectl delete`-ing a Sync-hook resource while ArgoCD's own sync operation was `Running` (waiting on another hook) made the two "compete for the same hook resource". | Concurrent actions with a running sync operation are unsafe; check `.status.operationState.phase` first. |
+| 2026-08-26, line 54 (harness) | After a transient DNS failure in `argocd-repo-server`, `.status.operationState.message` kept the old error although DNS had recovered; "`refresh=hard` alone may not refresh the failure state inside the repo-server process — `rollout restart deployment/argocd-repo-server` resolves it". | A stale message does not mean retries are failing. The log's remedy is a repo-server restart, not only a hard refresh. |
+| 2026-08-30, line 56 (gitops) and 2026-09-08, line 60 (gitops) | ArgoCD SSA failing with `may not specify more than 1 volume type` when a volume's type changed (emptyDir -> PVC; ConfigMap -> Secret under the same volume name). | Server-Side Apply merge failures on volume type changes; the log's prevention is to rename the volume or split the change over two commits. |
+| 2026-10-07, line 86 (gitops) | A `flink-sql-submit` Sync-hook Job failed with `BackoffLimitExceeded`; `beluga-data` sync kept retrying (OutOfSync, waiting on "hook batch/Job/flink-sql-submit") and could not pick up later changes; "the hook only runs at sync time, so static checks/CI did not reveal it". | A failed Sync hook blocks the whole application sync. |
+
+The earlier draft's claim "Flink jobs are lost after reboot / sync hooks are not re-run on reboot" is **not supported by the log**: lines 56, 61 and 76 are about SSA, Cilium TLS and Lakekeeper, and lines 87-88 are about Keycloak token exchange and a lakekeeper-bootstrap hook. What I can state, as an **inference from manifests, not an observed incident and not in the log**: the Flink session cluster's configuration sets no `high-availability.*` key (Beluga `gitops/charts/beluga-data/templates/05-flink-operator.yaml:10-20`), Beluga's own HA doc says that without HA a JobManager failure fails running programs (Beluga `docs/ha-dr-objectives.md:101`), and the submit hook runs only on ArgoCD Sync (`gitops/charts/beluga-data/templates/14-flink-jobs.yaml:27`). So a JobManager restart could leave jobs absent until the next sync. This ADR does not claim it has happened.
+
+### External references (opened 2026-10-07)
+
+- Argo CD RBAC — <https://argo-cd.readthedocs.io/en/stable/operator-manual/rbac/> (opened 2026-10-07; the page refers to "Since v3.0.0" / "New since v3.2", i.e. 3.x docs; the exact doc version is not printed): policy syntax `p, <role/user/group>, <resource>, <action>, <object>, <effect>`; resources include `applications`, `logs`, `exec`, …; policies live in `argocd-rbac-cm` under `policy.csv`; `logs` is a **separate resource** ("when granted with the `get` action, this policy allows a user to see Pod's logs").
+- Argo CD user management — <https://argo-cd.readthedocs.io/en/stable/operator-manual/user-management/> (opened 2026-10-07): local users are defined in `argocd-cm` (e.g. `accounts.alice: apiKey, login`); tokens are created with `argocd account generate-token --account <name>`; a new local user falls back to `policy.default` unless RBAC rules are added. The page I read does **not** state token expiry options or revocation for API keys: *not verified*.
+- Argo CD API — <https://argo-cd.readthedocs.io/en/stable/developer-guide/api-docs/> (opened 2026-10-07): Swagger UI is at `/swagger-ui` of the Argo CD UI; authentication uses a bearer token (obtained via `$ARGOCD_SERVER/api/v1/session` in the example); example endpoints use `api/v1`. The page does **not** list `/api/v1/applications` or `/api/v1/applications/{name}`, nor API stability guarantees. The exact application endpoints and response fields for 3.5.0 are therefore *not verified from docs*; the observed Application CR fields above are the verified part. The earlier draft's cited URL (`operator-manual/api/`) was not the API reference and is removed.
+- Argo CD health — <https://argo-cd.readthedocs.io/en/stable/operator-manual/health/> (opened 2026-10-07): health values `Healthy`, `Progressing`, `Degraded`, `Suspended`, and (in the aggregation text) `Missing`, `Unknown`. The page does not cover **sync** status values; `Synced` is observed live, while `OutOfSync`/`Unknown` are *not verified*.
+- Argo CD sync phases/hooks — <https://argo-cd.readthedocs.io/en/stable/user-guide/sync-waves/> (opened 2026-10-07; `resource_hooks/` now redirects here): hook phases `PreSync`/`Sync`/`PostSync`/`SyncFail`; deletion policies `HookSucceeded`/`HookFailed`/`BeforeHookCreation`; "If any of them fails the whole sync process will be marked as failed".
+- Argo CD diffing — <https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/> (opened 2026-10-07): says nothing about masking Secret values in diffs. The earlier draft's claim that "ArgoCD automatically redacts `kind: Secret` data in diff responses" is therefore **removed as unsupported**.
 
 ## Decision Drivers
 
-1. **Read-First GitOps Boundary**: Beluga Manager must never bypass Git or act as a shadow GitOps controller. Git commits remain the sole authoritative trigger for cluster state changes. Mutating actions (sync triggers, hard refresh, app deletion) are strictly forbidden in Phase 1.
-2. **Clear Show vs. Mutate Separation**: The Manager UI must transparently present GitOps synchronization facts (sync status, health status, git revision, configuration drift) without allowing accidental or unvetted out-of-band mutations.
-3. **Least-Privilege Authentication**: Domain API connects to ArgoCD using a dedicated, read-only ServiceAccount token with narrow `applications, get` permissions, avoiding admin or write credentials.
-4. **Resilience to Known Operational Pitfalls**: Design around documented failure modes in `beluga/docs/mistakes-log.md` (stuck sync hooks, post-reboot streaming job loss, and SSA merge conflicts).
-5. **Decoupled Domain Model Mapping**: Map upstream ArgoCD concepts (`Application`, `sync.status`, `health.status`, `operationState`) into native Beluga Domain models (`Deployment`, `Service`, `Workload`) without leaking ArgoCD-specific internal schemas into the web frontend.
+1. **Read-first GitOps boundary**: Git is the only authoritative trigger of cluster state change; the Manager never syncs, rolls back, refreshes or edits.
+2. **Authentication and authorization first** on the Manager API (hard prerequisite, ADR-0006 section 0), because the API currently has no authentication.
+3. **Least privilege toward ArgoCD**: a dedicated account allowed only `applications, get` — no logs, exec, sync, override.
+4. **No amplification**: one Manager request must not translate into unbounded ArgoCD calls.
+5. **No uncertain facts presented as authoritative** (`docs/architecture.md` Design Principle 6): application-to-service mapping is explicit configuration, not inference.
+6. **Reuse, not duplication**: ArgoCD stays the source of GitOps status; ADR-0005 stays the owner of packaging.
 
 ## Considered Options
 
-### Option 1: Direct In-App GitOps Mutator (Manager UI Exposes Sync/Rollback/Edit Actions)
-Provide "Sync Now", "Rollback", and manifest editing buttons in the Beluga Manager UI that invoke ArgoCD write APIs (`POST /api/v1/applications/{name}/sync`).
-- **Pros**: Convenience for operators wanting a single dashboard for everything.
-- **Cons**: Severe violation of `AGENTS.md` boundaries and GitOps principles; bypasses Git review and CI validation gates; can trigger catastrophic sync-hook races (as documented in `mistakes-log.md` row 51); risks operator confusion when `selfHeal` immediately reverts out-of-band changes.
-- **Outcome**: **Rejected**.
+### Option 1: In-app GitOps mutator (Sync/Rollback/Edit in the Manager UI)
+**Rejected**: bypasses Git review and CI; the log shows sync-hook races and silent selfHeal reversions (2026-08-25, 2026-08-26 entries); requires write credentials in the Manager.
 
-### Option 2: Direct Kubernetes CRD Polling via kube-apiserver
-Domain API bypasses ArgoCD's HTTP API and queries the `argoproj.io/v1alpha1` `Application` custom resources directly via Kubernetes API (`GET /apis/argoproj.io/v1alpha1/applications`).
-- **Pros**: Uses existing Kubernetes cluster credentials.
-- **Cons**: Bypasses ArgoCD's repo-server; cannot retrieve computed git-vs-live diffs; requires granting the Manager broader Kubernetes cluster-level RBAC (`applications.argoproj.io`); breaks air-gapped or remote GitOps setups where ArgoCD is hosted externally.
-- **Outcome**: **Rejected**.
+### Option 2: Read `Application` CRs directly from the Kubernetes API
+**Rejected** (Proposed judgement): requires giving the Manager cluster-level RBAC on `applications.argoproj.io` and ties it to in-cluster ArgoCD; the ArgoCD API gives an explicit, narrowly-scoped role (`applications, get`). Note that the status fields used here were observed on the CR, so the CR route is technically feasible; the rejection is about privilege scope.
 
-### Option 3: Read-Only ArgoCD Adapter with Domain Mapping & Operational Guardrails (Proposed)
-Domain API implements a dedicated, read-only **GitOps Adapter** that communicates with ArgoCD's REST API using a scoped read-only service account token. The adapter:
-1. Surfaces application sync status (`Synced`, `OutOfSync`), health (`Healthy`, `Degraded`, `Progressing`), and active git revisions.
-2. Exposes live-versus-desired drift summaries (which resources are out of sync and why).
-3. Detects and flags known stuck sync operations (e.g. stalled batch hook jobs).
-4. Correlates ArgoCD applications with Beluga `Service` and `Deployment` domain objects.
-5. Directs all mutation operations to Git pull requests via deep-links to the Beluga GitHub repository.
-- **Pros**: Preserves GitOps integrity; prevents authorization leaks; provides rich visibility without mutation risks; addresses historical operational traps directly.
-- **Cons**: Operators cannot trigger ad-hoc manual sync from the UI (must push to Git or use the external ArgoCD dashboard).
+### Option 3: Read-only ArgoCD adapter with explicit domain mapping and guardrails (Proposed)
+A single adapter using one narrow read-only ArgoCD account; surfaces sync/health/revision and per-resource sync status; flags a stalled sync operation; deep-links to the ArgoCD UI and to the Git repository for any change.
+- **Pros**: preserves GitOps integrity; minimal privilege; no manifest content crosses the adapter.
+- **Cons**: operators cannot sync or roll back from the Manager; requires new ArgoCD configuration owned by the Beluga repo.
 - **Outcome**: **Proposed**.
 
-## Decision Outcome
-
-**Proposed choice: Option 3 (Read-Only ArgoCD Adapter with Domain Mapping & Operational Guardrails)**.
+## Decision Outcome (Proposal)
 
 ```mermaid
 flowchart TD
     subgraph UI["Beluga Manager UI"]
-        DepView["Deployment & Service Status"]
-        DriftView["Git Drift & Revision Panel"]
-        WarnView["Stuck Sync & Operational Warnings"]
+        DepView["GitOps status panel"]
+        WarnView["Stalled sync warning"]
     end
-
     subgraph DomainAPI["Beluga Manager Domain API"]
-        GitOpsRouter["GET /api/v1/deployments\nGET /api/v1/gitops/applications\nGET /api/v1/gitops/drift"]
-        Adapter["ArgoCD Read-Only Adapter"]
-        Mapper["Domain Object Mapper"]
-        TrapDetector["Operational Pitfall Detector"]
+        AuthZ["OIDC JWT validation + per-resource authorization (prerequisite)"]
+        GitOpsRouter["GET /api/v1/gitops/applications (Proposed)"]
+        Guard["single-flight + TTL cache + deadline + concurrency cap + bounded queue"]
+        Adapter["ArgoCD read-only adapter (applications, get)"]
     end
-
-    subgraph ArgoCD["ArgoCD Control Plane (Authoritative)"]
-        ArgoAPI["ArgoCD REST API (:80/api/v1)\n(Token: role:beluga-manager-reader)"]
-        RepoServer["argocd-repo-server"]
+    subgraph ArgoCD["ArgoCD v3.5.0 (authoritative)"]
+        ArgoAPI["argocd-server API (account: beluga-manager, proposed)"]
     end
-
-    subgraph Git["Git Repository (Source of Truth)"]
-        GitHub["https://github.com/dasomel/beluga.git"]
-    end
-
-    UI --> GitOpsRouter
-    GitOpsRouter --> Adapter
-    Adapter --> ArgoAPI
-    ArgoAPI -.-> RepoServer
-    RepoServer -.-> GitHub
-    ArgoAPI --> Mapper --> UI
-    Adapter --> TrapDetector --> WarnView
-    UI -.->|External PR Link| GitHub
+    UI --> AuthZ --> GitOpsRouter --> Guard --> Adapter --> ArgoAPI
+    Adapter --> WarnView
+    UI -.->|link only| Git["Git repository / ArgoCD UI"]
 ```
 
-### 1. Show vs. Mutate Matrix (Phase 1 Boundary)
+### 0. HARD PREREQUISITE — authentication and authorization on the Manager API
 
-| Capability / Information | Manager UI Posture | Upstream Authoritative System | Operational Rationale |
-|---|---|---|---|
-| Application Sync Status (`Synced`, `OutOfSync`) | **Show (Read-Only)** | ArgoCD API | Essential operational visibility. |
-| Application Health (`Healthy`, `Degraded`, `Progressing`) | **Show (Read-Only)** | ArgoCD API / K8s status | Correlates infrastructure health with domain services. |
-| Target vs Live Git Commit SHA | **Show (Read-Only)** | ArgoCD Repo Server | Informs operators which git commit is currently deployed. |
-| Resource-Level Drift Diff | **Show (Read-Only)** | ArgoCD Diff API | Allows data engineers to see uncommitted runtime drifts. |
-| Stuck Sync Operation Warning | **Show (Read-Only)** | ArgoCD `operationState` | Highlights stalled batch jobs (e.g. `flink-sql-submit`). |
-| Sync Trigger ("Sync Now") | **FORBIDDEN (Mutating)** | Git Push / ArgoCD UI | Bypasses Git review; risks hook race conditions. |
-| Rollback to Previous Revision | **FORBIDDEN (Mutating)** | Git Revert PR | Rollbacks must be recorded in Git history. |
-| In-place Manifest Editing | **FORBIDDEN (Mutating)** | Git Repository | ArgoCD `selfHeal: true` will silently overwrite edits. |
-| Hard Refresh / Cache Invalidation | **FORBIDDEN (Mutating)** | ArgoCD CLI / UI | Mutation action; reserved for Phase 2 Safe Actions if audited. |
+Nothing in this ADR may be implemented or enabled until the Manager API validates real Keycloak OIDC/JWT tokens (signature via JWKS, `iss`, `aud`, `exp`) and authorizes the caller **per resource** (which applications a caller may see). This is the same prerequisite as ADR-0006 section 0 (including its CSRF rule: bearer header, not cookie; for read-only `GET` routes the main concern is access control, but any future non-GET route inherits ADR-0006's rules). Even though this adapter is read-only, the revision SHAs, application names and error messages reveal platform topology and operational state. Routes fail closed (401/403) when authentication is not configured. Claim/role names are *not verified* and must be taken from the live realm.
 
-### 2. Authentication Contract to ArgoCD
-1. **ArgoCD RBAC Policy**:
-   In `beluga/gitops/charts/beluga-platform/templates/` (or `argocd-rbac-cm`), define a dedicated read-only role:
+### 1. Show vs. mutate (Phase 1)
+
+| Capability / Information | Manager posture | Source |
+|---|---|---|
+| Application sync status, health status | **Show** | ArgoCD Application status |
+| `targetRevision` (observed `HEAD`) and resolved `.status.sync.revision` (commit SHA) | **Show** | ArgoCD Application |
+| Per-resource sync status (kind/name/namespace/status) | **Show** | `.status.resources[]` (observed fields) |
+| Operation phase/message and stalled-operation warning | **Show** | `.status.operationState` |
+| Resource manifests, live/target diffs, pod logs | **Not exposed** in Phase 1 (deep-link to the ArgoCD UI) | Avoids moving Secret-bearing content through the adapter; Secret masking in ArgoCD diffs is not verified |
+| Sync, hard refresh, rollback, manifest edit, app deletion | **FORBIDDEN** | Git push / external ArgoCD UI |
+
+### 2. Authentication contract to ArgoCD (Proposal)
+
+Current state: `argocd-rbac-cm` is empty and ArgoCD configuration is not in Beluga gitops. Everything below is **proposed** and is a **Beluga-repo change** (the Beluga repo owns cluster state; the Manager never edits it), to be tracked as an issue there.
+
+1. **Account**: a local account `beluga-manager` with the `apiKey` capability only (no `login`), defined in `argocd-cm` (`accounts.beluga-manager: apiKey`, per the user-management docs).
+2. **RBAC** (in `argocd-rbac-cm`, `policy.csv`), read-only and **without logs**:
    ```csv
-   p, role:beluga-manager-reader, applications, get, */*, allow
-   p, role:beluga-manager-reader, logs, get, */*, allow
+   p, role:beluga-manager-reader, applications, get, default/beluga-*, allow
+   g, beluga-manager, role:beluga-manager-reader
    ```
-2. **Token Provisioning**:
-   Domain API receives an ArgoCD authentication token via Kubernetes Secret reference (`ARGOCD_AUTH_TOKEN`). The token is generated from a dedicated ServiceAccount in namespace `argocd`. No admin credentials (`admin`, `admin-secret`) are mounted or stored.
+   The object pattern `default/beluga-*` (project `default` is what the three Applications use; the app-name pattern is a Proposed narrowing) replaces the earlier `*/*`. The earlier draft also granted `logs, get, */*`; that is removed because pod logs may contain secrets, and Decision Driver 3 is "applications get only". `policy.default` must not give the account broader access (the docs state a user without rules falls back to `policy.default`; the live default is not inspected here, *not verified*).
+3. **Where it lives**: not `beluga-platform/templates/` as the earlier draft said — no ArgoCD templates exist there. Options are extending `scripts/gitops/01-argocd-bootstrap.sh` or adding an ArgoCD-config chart/manifests to the Beluga repo; that choice belongs to the Beluga repo (Open Question 1).
+4. **Token handling**: the token is stored in a Kubernetes Secret referenced by the Manager Deployment (env from `secretKeyRef`); never in values, logs or the audit trail. **Rotation (Proposed)**: regenerate the token and update the Secret on a schedule and on any suspected exposure; whether API-key tokens can carry an expiry or be revoked is *not verified* in the docs I opened, so the rotation procedure must be confirmed against the 3.5.0 CLI before implementation.
+5. **Confused deputy**: the adapter uses one service token for every caller, so the token's reach (all `beluga-*` apps) is the maximum any caller could see. The Manager therefore authorizes the *caller* per application (section 0) before returning data, filters the result to the caller's allowed set, and never forwards the end user's token to ArgoCD. Whether ArgoCD SSO could carry per-user identity is *not verified* and out of scope.
+6. **TLS and server-URL validation (SSRF)**: the ArgoCD base URL comes only from deployment configuration (an allow-listed in-cluster service URL), never from a request parameter. The adapter must not follow redirects to other hosts, must cap response size, and must use only the fixed GET paths it needs. TLS: today ArgoCD is plain HTTP inside the cluster (`server.insecure: "true"`, Current state), so in-cluster calls to `argocd-server:80` are unencrypted; the Manager must at least verify the target is the configured service, and a TLS-verified path (`443`) should be evaluated; its certificate chain is *not verified*.
 
-### 3. Domain Model Mapping Specification
-The GitOps adapter translates ArgoCD application structures into the unified Beluga domain model:
+### 3. Domain mapping (Proposal)
 
-1. **`Application` -> Beluga Domain Entity**:
-   - `beluga-platform` maps to Service `svc-platform` and System Deployment scope.
-   - `beluga-data` maps to Data Platform Services (`svc-kafka`, `svc-flink`, `svc-trino`, `svc-airflow`, `svc-iceberg`).
-2. **Status Field Normalization**:
-   - ArgoCD `.status.sync.status`:
-     - `"Synced"` -> Domain `syncStatus: "synced"`
-     - `"OutOfSync"` -> Domain `syncStatus: "drifted"`
-     - `"Unknown"` -> Domain `syncStatus: "unknown"`
-   - ArgoCD `.status.health.status`:
-     - `"Healthy"` -> Domain `healthStatus: "healthy"`
-     - `"Degraded"` -> Domain `healthStatus: "degraded"`
-     - `"Progressing"` -> Domain `healthStatus: "stale"` (or transitioning)
-     - `"Missing"` -> Domain `healthStatus: "degraded"`
-3. **Revision Metadata**:
-   - `.status.sync.revision` (Live Git SHA-1) and `.spec.source.targetRevision` (e.g. `main` or branch) are exposed as immutable string fields.
+There is no `Deployment` or GitOps domain type today (Current state); this ADR proposes new types, it does not map onto existing ones.
 
-### 4. Direct Mitigations for Known Platform Traps (`mistakes-log.md`)
+1. **Application -> Service**: an **explicit configuration table** mapping an ArgoCD application to the Manager service ids that exist in the fixtures, for example `beluga-data` -> `svc-trino`, `svc-airflow`, `svc-iceberg`, `svc-kafka`, `svc-flink`, `svc-superset`. `beluga-platform` has **no matching service id today** (`svc-platform` does not exist); it is shown as an application-level entry unless a service id is added by a separate decision. The mapping is declared, not inferred, to respect `docs/architecture.md` Design Principle 6.
+2. **Status normalization** (domain value names are Proposed): sync `Synced` -> `synced` (observed), other values passed through as `unknown`/`out-of-sync` only after the 3.5.0 values are verified (*not verified*); health `Healthy`/`Progressing`/`Degraded`/`Suspended`/`Missing`/`Unknown` passed through 1:1 (documented). `Progressing` is **not** mapped to a "stale" state as the earlier draft did.
+3. **Revision metadata**: expose `spec.source.targetRevision` (observed `HEAD`) and `.status.sync.revision` (SHA) as read-only strings.
 
-Based on documented real-world production defects in `beluga/docs/mistakes-log.md`:
+### 4. Guardrails derived from the operational history (Proposal)
 
-| Known Platform Trap | Historical Evidence | Root Cause | Manager Integration Guardrail |
-|---|---|---|---|
-| **Stuck Sync Operation** | Row 47, 51: `.status.operationState` stuck in `Running` waiting for a hook job; blocks all subsequent git syncs. | Sync hooks (`argocd.argoproj.io/hook: Sync`, `BeforeHookCreation`) competing or failing silently. | Manager detects `operationState.phase == "Running"` with duration > 10m; displays a prominent **Operational Warning**: *"Application sync stalled on hook job: check job logs"*; never attempts concurrent sync. |
-| **Post-Reboot Flink Job Loss** | Row 56, 61, 76: Cluster/node reboot restarts Flink session cluster; SQL jobs submitted via one-time batch hook (`flink-sql-submit`) are not re-executed. | Sync hooks only execute during GitOps sync events, not during node reboots or pod rescheduling. | Operations view correlates Flink Job status with GitOps status: flags Flink jobs whose runtime status is `SUSPENDED` or `NOT_FOUND` despite the parent application reporting `Synced/Healthy`. |
-| **Silent `selfHeal` Rollbacks** | Row 47: Manual `kubectl apply` edits are silently reverted to Git state within minutes by ArgoCD selfHeal. | `automated.selfHeal: true` continuously overwrites out-of-band cluster edits. | Manager UI explicitly warns operators: *"Git is the authoritative source. Runtime edits will be overwritten by GitOps selfHeal within 3 minutes."* |
-| **SSA Merge Volume Deadlocks** | Row 54, 58: Changing volume types (emptyDir -> PVC or ConfigMap -> Secret) causes Server-Side Apply to fail with `may not specify more than 1 volume type`. | Kubernetes API forbids mutating volume types in-place on existing Deployments/StatefulSets. | Drift inspector highlights volume type mismatches and annotates: *"Recreate strategy or pod deletion required for volume transition."* |
-| **Repo-Server Cached Failures** | Row 52: `argocd-repo-server` caches transient DNS errors; repeats stale failure message despite recovery. | Repo-server internal git cache persistence. | Domain API indicates cache age and recommends hard refresh via ArgoCD CLI if error persists > 15m. |
+| Situation (source: Current state log excerpts) | Manager behaviour |
+|---|---|
+| Sync operation stays `Running` (hook waiting; 2026-08-26 and 2026-10-07 entries) | Show a warning when `.status.operationState.phase == "Running"` for longer than **10 minutes (Proposed)**, with the operation message and a link to the ArgoCD UI. Never trigger or retry a sync. |
+| Failed Sync hook blocks the application (2026-10-07 entry) | Surface `operationState.message` (redacted) and the name of the hook resource if present in it; no remediation from the Manager. |
+| Stale operation message after repo-server failure (2026-08-26, line 54) | Show the message together with its timestamp and a note that it may be stale; the documented operator remedy is a repo-server restart outside the Manager. The earlier draft's "recommend hard refresh" is removed: the log says a hard refresh alone may not clear it. |
+| Out-of-band edits get reverted by selfHeal (2026-08-25) | Static UI note: "Git is authoritative; runtime edits are reverted by selfHeal within minutes" (no numeric claim; the log says "a few minutes"). |
+| SSA volume-type failures (2026-08-30, 2026-09-08) | Show the failing resource and ArgoCD's message; no auto-remediation. The log's remedy (rename the volume or use a two-step commit) is documentation for operators, not an action. |
+| Flink jobs absent while the app is `Synced/Healthy` | **Open question, not a guardrail**: it depends on the Flink adapter (PR #132) and on the inference above, which is not an observed incident. Not part of Phase 1. |
 
-### 5. Proposed API Shape Sketch (Clearly Labeled Design Proposal)
+### 5. Request amplification controls (Proposal)
 
-> **Proposal Note**: The following schemas and routes represent the planned design contract and are not implemented in the current repository code.
+The sibling adapter work (PRs #132 merged, #133) needed the same controls; alignment with those conventions is to be checked at implementation (I did not re-read them here). All values are *Proposed*:
+- **One upstream call per refresh**: a single list call serves the whole view; no per-application fan-out for the list.
+- **Single-flight**: concurrent identical requests share one in-flight upstream call.
+- **TTL cache**: 30 s.
+- **Per-call timeout** 2000 ms and a **total request deadline** (including queueing) of 5 s.
+- **Concurrency cap** of 2 in-flight ArgoCD calls and a **bounded queue** of 10; excess requests get a degraded/503 response rather than waiting.
+- On timeout, 401/403/5xx, or open circuit: serve the last cached value marked stale, or `unknown`; never return an HTTP 500 for the whole page.
+
+### 6. API shape sketch (Proposal; not implemented)
 
 ```typescript
-// Proposed GitOps Domain Schemas
 export interface GitOpsApplicationSummary {
-  name: string; // e.g. "beluga-data"
-  project: string; // "default"
-  repoUrl: string; // "https://github.com/dasomel/beluga.git"
-  path: string; // "gitops/charts/beluga-data"
-  targetRevision: string; // "main"
-  liveRevision: string; // "2081fef..."
-  syncStatus: "synced" | "drifted" | "unknown";
-  healthStatus: "healthy" | "degraded" | "progressing" | "missing";
-  lastSyncedAt: string;
-  operationState?: {
-    phase: "Running" | "Succeeded" | "Failed" | "Error";
-    startedAt: string;
-    message?: string;
-    isStuck: boolean; // Flagged if Running > 10m
-  };
-  managedResourcesCount: number;
-  outOfSyncResourcesCount: number;
-}
-
-export interface GitOpsResourceDrift {
-  kind: string; // "Deployment"
-  name: string; // "flink-cluster"
-  namespace: string; // "streaming"
-  liveStateSummary: string;
-  targetStateSummary: string;
-  diffSummary?: string; // Unified diff representation
+  name: string;                 // e.g. "beluga-data"
+  project: string;              // observed: "default"
+  targetRevision: string;       // observed: "HEAD"
+  liveRevision: string;         // commit SHA from .status.sync.revision
+  syncStatus: "synced" | "unknown";            // other values only after verification on 3.5.0
+  healthStatus: "healthy" | "progressing" | "degraded" | "suspended" | "missing" | "unknown";
+  operation?: { phase: string; startedAt: string; finishedAt?: string; message?: string; stalled: boolean };
+  serviceIds: string[];         // from explicit configuration
+  resources: Array<{ kind: string; name: string; namespace: string; syncStatus: string }>;
+  fetchedAt: string;            // staleness indicator
 }
 ```
 
-Proposed HTTP Endpoints:
-- `GET /api/v1/gitops/applications`: List managed ArgoCD applications with sync and health summaries.
-- `GET /api/v1/gitops/applications/{name}`: Detailed view of a single application including tree and operation state.
-- `GET /api/v1/gitops/applications/{name}/drift`: List resources exhibiting live-vs-git configuration drift.
+Proposed endpoints: `GET /api/v1/gitops/applications`, `GET /api/v1/gitops/applications/{name}`. The earlier draft's `/drift` endpoint with live/target state summaries and diffs is dropped for Phase 1 (see section 1).
 
 ## Consequences
 
 ### Positive
-- Bridges the visibility gap between Beluga Manager and the underlying GitOps deployment engine without granting wide cluster credentials to operators.
-- Protects the platform from accidental out-of-band mutations by enforcing Git as the sole mutating source of truth.
-- Provides early diagnostic detection of known platform failure modes (stalled sync hooks, post-reboot streaming job loss) directly in the Operations view.
-- Provides a clean foundation for future Phase 2 deployment operations (PR-based Git workflows).
+- Operators see sync/health/revision without ArgoCD credentials.
+- Minimal privilege toward ArgoCD and no manifest content passing through the Manager.
+- Explicit separation from ADR-0005's packaging scope.
 
 ### Negative
-- Operators cannot trigger instant rollbacks or sync retries directly within Beluga Manager in Phase 1 (requires accessing ArgoCD UI or Git).
-- Dependency on ArgoCD REST API availability: if `argocd-server` is degraded, GitOps status degrades to `unknown`.
+- Needs ArgoCD account/RBAC changes in the Beluga repo and a secret-handling procedure.
+- No sync/rollback from the Manager.
+- ArgoCD API shape for 3.5.0 must still be verified before coding.
 
 ## Alternatives Considered
 
-1. **Embedding FluxCD Controller instead of ArgoCD**:
-   - *Why rejected*: Beluga platform is firmly standardized on ArgoCD 2.13.0 with an existing `app-of-apps` architecture. Introducing FluxCD would create architectural divergence and violate principle 3.
-2. **Triggering Git commits directly from Domain API**:
-   - *Why rejected*: Domain API would require GitHub Personal Access Tokens or SSH write keys with push access to `dasomel/beluga`. Storing and using write tokens in the Manager introduces severe security and blast-radius risks.
+1. **Switch to or embed Flux** — rejected: Beluga standardizes on ArgoCD (`VERSIONS.md:19`, v3.5.0) with an existing app-of-apps; no benefit shown. (The earlier draft said "2.13.0"; corrected.)
+2. **Manager commits to Git directly** — rejected: would need a write token to `dasomel/beluga`, a large blast radius. A later PR-creating flow is Open Question 2.
 
 ## Risks and Mitigations
 
-| Risk | Impact | Mitigation Strategy |
+| Risk | Impact | Mitigation (Proposed) |
 |---|---|---|
-| ArgoCD API downtime / latency | Domain API requests to `/api/v1/gitops/*` hang or fail. | Enforce 2000ms HTTP timeout in GitOps adapter; cache application summary for 30s; degrade gracefully to `syncStatus: "unknown"`. |
-| Accidental mutation exposure | Engineer invokes write API via unauthorized route. | GitOps adapter only implements HTTP GET methods; zero write/sync methods exist in the adapter codebase. |
-| Ingestion of sensitive diffs | Git drift diff exposes plaintext Secret values. | ArgoCD automatically redacts `kind: Secret` data in diff responses; Domain API redacts any parameters matching credential keys. |
-| Stale git revision cache | Manager shows outdated commit SHA. | Surface both `targetRevision` (branch) and resolved `liveRevision` (commit SHA) with timestamp. |
+| Unauthenticated Manager API leaks platform state | Any caller sees app names, SHAs, messages | Hard prerequisite (section 0) |
+| Over-broad ArgoCD token | Compromise reaches all matched apps | Narrow `applications, get`, name-pattern scope, no logs, rotation |
+| SSRF / redirect via configurable URL | Manager used to reach arbitrary hosts | Config-only URL, no redirects, fixed paths, response cap |
+| ArgoCD API slow or down | Page latency or failure | Section 5 controls; stale/unknown fallback |
+| Operation message contains secrets | Secret exposure to browser | Redact before serialization; message length cap; no manifests exposed |
+| Reading status fields that differ in 3.5.0 | Wrong status shown | Verify against 3.5.0 before coding; pass unknown values through as `unknown` |
 
 ## Open Owner Questions
 
-1. **Phase 2 Git Mutation Workflow**: In Phase 2, should Beluga Manager support creating Git Pull Requests (via GitHub API) to update image tags or configuration values?
-   - *Recommendation*: Yes. Creating GitHub PRs preserves code review, CI validation, and auditability while enabling self-service platform updates from the Manager UI.
-2. **Flink Job Declarative Migration**: Should `14-flink-jobs.yaml` migrate from batch Sync hooks to the native `FlinkDeployment` CRD of Flink Kubernetes Operator 1.15 to prevent post-reboot job loss?
-   - *Recommendation*: Yes. Managing streaming jobs via `FlinkDeployment` custom resources makes Flink job state declarative, self-healing, and resilient across node reboots without relying on one-off batch hooks.
-3. **Drift Diff Granularity**: Should the Manager show full unified YAML diffs or high-level field summaries?
-   - *Recommendation*: High-level field summaries (e.g. `image: v1 -> v2`, `replicas: 1 -> 2`) for Phase 1; full diffs should deep-link to the ArgoCD application UI.
+1. **Where does ArgoCD account/RBAC configuration live in the Beluga repo** (bootstrap script vs. a new chart)?
+   - *Recommendation*: raise a Beluga issue; prefer declarative manifests over script patches so selfHeal and review apply.
+2. **Phase 2: create Git PRs from the Manager?**
+   - *Recommendation*: only after ADR-0006's authentication prerequisite; use a GitHub App with narrow scope, never a personal write token.
+3. **Flink jobs vs. GitOps status correlation** and the migration of Flink job submission away from the Sync hook.
+   - *Recommendation*: do not decide here; ADR-0006 section 2a already analyses the Flink/ArgoCD interaction, and the inference in this ADR's Current state needs an observed reproduction before it becomes a guardrail.
+4. **TLS between the Manager and `argocd-server`** given `server.insecure: "true"`.
+   - *Recommendation*: evaluate calling the `443` port with a verified chain; if not feasible, accept in-cluster plain HTTP with a NetworkPolicy and document the residual risk.
+5. **Which sync-status values does ArgoCD 3.5.0 emit and what are the exact application endpoints?**
+   - *Recommendation*: a spike against the live argocd-server's Swagger UI (`/swagger-ui`, per the API docs page) before coding.
 
 ## Follow-up Implementation Tasks & Acceptance Test Ideas
 
-1. **Task 1: GitOps Application Schema and Read-Only Router**
-   - Implement Zod OpenAPI schemas for `GitOpsApplicationSummary` and `GitOpsResourceDrift`.
-   - *Acceptance test*: Unit tests validating schema serialization and handling of optional `operationState` fields.
-2. **Task 2: ArgoCD REST Client Adapter**
-   - Implement HTTP client communicating with `GET /api/v1/applications` with Bearer token authentication and 2s timeout.
-   - *Acceptance test*: Mock server test verifying that HTTP 401 or 503 from ArgoCD results in `status: "unknown"` and does not crash the Domain API.
-3. **Task 3: Stuck Sync Hook Diagnostic Detector**
-   - Implement logic evaluating `.status.operationState` to detect sync jobs running > 10 minutes.
-   - *Acceptance test*: Unit test asserting that an application with `phase: "Running"` and `startedAt: "20 minutes ago"` triggers `isStuck: true` and warning message.
-4. **Task 4: Deployment & Service Correlation Mapping**
-   - Implement mapper linking ArgoCD application resources to Beluga Domain `Service` and `Deployment` entities.
-   - *Acceptance test*: Verification test proving that resources in `beluga-data` are correctly associated with `svc-kafka`, `svc-flink`, and `svc-trino`.
-5. **Task 5: Frontend GitOps Status Badge Component**
-   - Create UI status badges in `packages/web` displaying `Synced` (green), `Drifted` (amber), and `Stuck Hook` (red) with tooltip explanations.
-   - *Acceptance test*: Component render test verifying correct accessible labels and color assignments.
+1. **Authentication/authorization middleware** (shared with ADR-0006 Phase 0). *Acceptance*: unauthenticated and unauthorized callers get 401/403; unconfigured auth fails closed.
+2. **Beluga-repo change**: ArgoCD account `beluga-manager` + RBAC (read-only, no logs). *Acceptance*: with the token, `applications, get` succeeds and a log/sync call is denied by ArgoCD (verified on a non-production cluster first).
+3. **ArgoCD client adapter** with fixed GET paths, no redirects, size cap. *Acceptance*: mock tests for 401/403/5xx/timeout produce stale/`unknown`, not an unhandled error; a redirect to another host is refused.
+4. **Amplification guard**. *Acceptance*: N concurrent requests yield one upstream call; the queue and concurrency limits reject excess load; the total deadline is honoured.
+5. **Status mapping** from the verified 3.5.0 values. *Acceptance*: unknown values map to `unknown`; `Progressing` is never reported as healthy or stale.
+6. **Stalled-operation detector**. *Acceptance*: `Running` beyond the configured threshold sets `stalled: true`; the message is redacted.
+7. **Frontend status badges** in `packages/web`. *Acceptance*: accessible labels; stale data is visibly marked.
