@@ -29,7 +29,7 @@ Beluga Manager는 Beluga 데이터 플랫폼 위의 통합 계층입니다. `AGE
 | Beluga는 Flink REST API를 인증 없는 대시보드/REST 표면으로 기술합니다. | Beluga `docs/critical-interfaces-inventory.md:29`. |
 | Airflow는 3.3.0이며 UI 로그인에 FAB 인증 매니저 + Keycloak OIDC를 씁니다. | Beluga `VERSIONS.md:36`; `gitops/charts/beluga-data/templates/07-airflow.yaml:196-197`(`FabAuthManager`), `:74-94`(OAuth/Keycloak). |
 | CNPG 클러스터는 네임스페이스 `database`의 `postgres-main`입니다. | Beluga `gitops/charts/beluga-data/templates/02-cnpg.yaml:3-5`; 라이브 `kubectl -n database get clusters.postgresql.cnpg.io` -> `postgres-main`. |
-| ArgoCD `selfHeal`은 대역 외 수정을 조용히 되돌립니다. | Beluga `docs/mistakes-log.md:49`(2026-08-25 항목). |
+| ArgoCD `selfHeal`은 대역 외 수정을 조용히 되돌립니다. | Beluga `docs/mistakes-log.md`, 2026-08-25(gitops) 항목, 발췌: "selfHeal: true … `kubectl apply`로 직접 편집하면 ArgoCD가 몇 분 내로 조용히 origin/main 상태로 되돌린다" (beluga 커밋 1df61e0 기준). 이 항목은 관리 리소스에 대한 `kubectl apply` 직접 편집에 관한 것입니다. |
 
 ### 외부 참고 자료(2026-10-07 열람)
 
@@ -96,12 +96,12 @@ Domain API에는 현재 인증이 없으므로(현재 상태), **다음 항목�
 본 ADR이 파드 재시작을 금지할 때 쓴 논거와 같은 방식을 현재 상태 사실에 적용합니다.
 
 1. **오퍼레이터의 소유 범위.** `flink-cluster`는 `spec.job`이 없는 세션 클러스터이며 오퍼레이터는 클러스터(JobManager/TaskManager)를 reconcile하고 SQL 잡은 reconcile하지 않습니다. 잡은 `flink-sql-submit` 훅(`14-flink-jobs.yaml`)이 `sql-client.sh`로 제출했습니다. 오퍼레이터가 이런 잡을 추적하는지는 열람한 문서로는 *not verified*이며, 관측된 사실은 라이브 `FlinkDeployment`에 잡 상태가 없다는 것입니다(`kubectl get flinkdeployment`의 JOB STATUS 열이 비어 있음).
-2. **ArgoCD가 stop/cancel에 하는 일.** `beluga-data`는 `selfHeal: true`이고 `flink-sql-submit` 훅은 sync마다 재실행됩니다. 훅은 잡이 활성 상태일 때만 건너뜁니다. **CANCELED 또는 FINISHED인 잡(`stop`의 결과, `cancel-job` 여부 무관)은 다음 sync에서 SQL로 재제출되며 세이브포인트를 복원하지 않습니다**(`14-flink-jobs.yaml`의 `submit()`은 복원 옵션을 넘기지 않음). 따라서 Manager가 REST로 중지해도 다음 sync에서 조용히 되돌려지고 새 잡은 커넥터 기본 동작으로 시작하며(Kafka 오프셋/Iceberg 싱크 동작은 여기서 분석하지 않음), 원래 상태보다 나쁩니다. 이는 `docs/mistakes-log.md:49`에 기록된 selfHeal 함정과 같습니다.
+2. **ArgoCD가 stop/cancel에 하는 일.** `beluga-data`는 `selfHeal: true`이고 `flink-sql-submit` 훅은 sync마다 재실행됩니다. 훅은 잡이 활성 상태일 때만 건너뜁니다. **CANCELED 또는 FINISHED인 잡(`stop`의 결과, `cancel-job` 여부 무관)은 다음 sync에서 SQL로 재제출되며 세이브포인트를 복원하지 않습니다**(`14-flink-jobs.yaml`의 `submit()`은 복원 옵션을 넘기지 않음). 따라서 Manager가 REST로 중지해도 다음 sync에서 조용히 되돌려지고 새 잡은 커넥터 기본 동작으로 시작하며(Kafka 오프셋/Iceberg 싱크 동작은 여기서 분석하지 않음), 원래 상태보다 나쁩니다. 이는 `docs/mistakes-log.md`의 2026-08-25 항목에 기록된 selfHeal 함정과 같습니다(현재 상태 참조).
 3. **중지 없는 세이브포인트**(`cancel-job=false`인 `POST /jobs/:jobid/savepoints`)는 잡 상태를 바꾸지 않으므로 훅이나 selfHeal과 충돌하지 않습니다. 하지만 **설정된 세이브포인트 디렉터리가 없으므로**(현재 상태) 대상 경로를 Manager가 제공해야 합니다. 따라서 이전 초안의 `s3://beluga-lake/savepoints/`는 현재 경로가 아니라 *제안*입니다. S3 자격 증명은 Flink 파드에 주입되어 있으므로(`05-flink-operator.yaml:64-80`) Manager에 추가 자격 증명은 필요 없지만, 버킷 경로 권한은 *not verified*입니다.
 4. **오퍼레이터 네이티브 대안**과 현재 맞지 않는 이유: `upgradeMode`/`state: suspended`를 쓰는 `FlinkSessionJob`은 개요 페이지상 jar 기반(`jarURI`)이나 Beluga의 잡은 SQL 클라이언트 제출입니다. 도입하려면 세 파이프라인을 jar로 재패키징하고 Beluga 레포 GitOps 매니페스트를 바꿔야 하며 이는 본 ADR 밖의 플랫폼 결정입니다. CR 기반 세이브포인트 트리거(`savepointTriggerNonce`)는 열람한 1.15 페이지에서 *not verified*입니다. 오퍼레이터 네이티브 경로는 모두 ArgoCD가 소유한 CR을 수정하므로 런타임 쓰기가 아니라 Git(Beluga 레포 PR)을 거쳐야 합니다. 즉 Safe Action이 아니라 ADR-0005가 다루는 GitOps 변경입니다.
 5. **결론(제안)**: Flink 세이브포인트/중지는 본 ADR의 어느 단계에도 포함하지 않습니다. 세이브포인트 전용 조치를 다시 검토한다면 (a) Beluga가 먼저 GitOps에 세이브포인트 디렉터리를 정의하고, (b) `cancel-job=false`로 한정하며, (c) 인증 선행 조건을 통과해야 합니다. 중지/취소는 sync 훅이 세이브포인트에서 복원하도록 바뀌거나 파이프라인이 오퍼레이터 관리로 이동하기 전에는 노출하지 않습니다. 이는 Beluga 레포 변경이며 결정이 아니라 레포 간 의존성으로 기록합니다.
 
-범위 외(등급 3): Kubernetes Pod/Service 재시작(ArgoCD `selfHeal`이 되돌림: `docs/mistakes-log.md:49`), Kafka 토픽 변경(Strimzi `KafkaTopic` CR이 원천 — 이번 개정에서 *재확인하지 않음*), Iceberg 테이블 drop/purge.
+범위 외(등급 3), 정정된 근거: ArgoCD `selfHeal`은 관리 리소스의 *선언된 스펙* 드리프트를 되돌립니다(2026-08-25 항목은 `kubectl apply` 직접 편집에 관한 것). 파드 삭제를 그 자체로 되돌리지는 않으며 파드는 소유 컨트롤러(ReplicaSet/StatefulSet/오퍼레이터)가 다시 만듭니다(일반적인 Kubernetes 동작이며 이번 개정에서 문서로 재확인하지 않음). 따라서 Manager가 파드를 재시작하면 안 되는 이유는 다음과 같습니다: (a) Git 리뷰와 Manager의 감사/인가 경로를 우회한다; (b) Manager 서비스 계정에 광범위한 파드 삭제 RBAC가 필요하다(confused-deputy 표면, 0절); (c) 상태 저장 워크로드에 파괴적이며(예: Flink 세션 클러스터에는 `high-availability.*` 키가 없어 Beluga `05-flink-operator.yaml:10-20`, JobManager 재시작 시 다음 sync까지 실행 중 잡이 사라질 수 있음 — 관측된 사고가 아닌 추론) 선언된 상태를 바꾸지 않으므로 지속적으로 고치는 것이 없다; (d) 지속적인 수정은 Git에 속한다. 나머지 등급 3 항목: Kubernetes Pod/Service 재시작(아래 근거 참조), Kafka 토픽 변경(Strimzi `KafkaTopic` CR이 원천 — 이번 개정에서 *재확인하지 않음*), Iceberg 테이블 drop/purge.
 
 ### 3. Preview/execute, 재전송과 멱등성 (제안)
 
