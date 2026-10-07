@@ -18,9 +18,10 @@ const SqlEditorBody: React.FC<SqlEditorBodyProps> = ({ value, theme, label }) =>
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const themeCompartment = useRef(new Compartment());
+  const attrsCompartment = useRef(new Compartment());
   // Latest values for the one-time view creation, without re-creating the view on every change.
-  const initial = useRef({ value, theme });
-  initial.current = { value, theme };
+  const initial = useRef({ value, theme, label });
+  initial.current = { value, theme, label };
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -33,7 +34,7 @@ const SqlEditorBody: React.FC<SqlEditorBodyProps> = ({ value, theme, label }) =>
           EditorState.readOnly.of(true),
           EditorView.editable.of(false),
           EditorView.lineWrapping,
-          EditorView.contentAttributes.of(editorContentAttributes(label)),
+          attrsCompartment.current.of(EditorView.contentAttributes.of(editorContentAttributes(initial.current.label))),
           themeCompartment.current.of(editorThemeExtensions(initial.current.theme)),
         ],
       }),
@@ -44,6 +45,15 @@ const SqlEditorBody: React.FC<SqlEditorBodyProps> = ({ value, theme, label }) =>
       view.destroy();
       viewRef.current = null;
     };
+  }, []);
+
+  // Label changes (e.g. locale switch) reconfigure only the attributes: no view rebuild, scroll/selection kept.
+  useEffect(() => {
+    viewRef.current?.dispatch({
+      effects: attrsCompartment.current.reconfigure(
+        EditorView.contentAttributes.of(editorContentAttributes(label)),
+      ),
+    });
   }, [label]);
 
   useEffect(() => {

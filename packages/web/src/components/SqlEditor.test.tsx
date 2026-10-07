@@ -5,6 +5,7 @@ import { EditorState } from '@codemirror/state';
 import { sql } from '@codemirror/lang-sql';
 import { highlightTree } from '@lezer/highlight';
 import { SqlEditor, type SqlEditorProps } from './SqlEditor';
+import { ChunkErrorBoundary } from './ChunkErrorBoundary';
 import {
   EDITOR_PALETTES,
   contrastRatio,
@@ -20,6 +21,8 @@ const baseProps: SqlEditorProps = {
   theme: 'light',
   label: 'Trino starter SQL editor',
   loadingLabel: 'Loading SQL editor...',
+  loadFailedLabel: 'Editor failed to load',
+  retryLabel: 'Retry',
   title: 'Trino Starter SQL',
   readOnlyBadgeLabel: 'Read-only starter SQL',
   copyLabel: 'Copy SQL',
@@ -116,5 +119,47 @@ describe('contrastRatio', () => {
   it('matches known values', () => {
     expect(contrastRatio('#000000', '#ffffff')).toBeCloseTo(21, 5);
     expect(contrastRatio('#94a3b8', '#f8fafc')).toBeLessThan(3); // the old light gutter (2.45:1)
+  });
+});
+
+describe('ChunkErrorBoundary', () => {
+  const props = {
+    value: sampleSql,
+    label: 'Trino starter SQL editor',
+    failedLabel: 'Editor failed to load',
+    retryLabel: 'Retry',
+    onRetry: () => {},
+    children: <span>live editor</span>,
+  };
+
+  it('turns a render/chunk error into failed state', () => {
+    expect(ChunkErrorBoundary.getDerivedStateFromError()).toEqual({ failed: true });
+  });
+
+  it('renders children while healthy', () => {
+    const b = new ChunkErrorBoundary(props);
+    expect(renderToStaticMarkup(<>{b.render()}</>)).toContain('live editor');
+  });
+
+  it('after a failure renders the plain copyable SQL, a status message and a retry button', () => {
+    const b = new ChunkErrorBoundary(props);
+    b.state = { failed: true };
+    const html = renderToStaticMarkup(<>{b.render()}</>);
+    expect(html).not.toContain('live editor');
+    expect(html).toContain('role="status"');
+    expect(html).toContain('Editor failed to load');
+    expect(html).toContain('Retry');
+    expect(html).toContain('&quot;beluga_lake&quot;');
+    expect(html).toContain('aria-label="Trino starter SQL editor"');
+  });
+
+  it('retry notifies the parent (fresh import) and clears the failed state', () => {
+    let called = 0;
+    const b = new ChunkErrorBoundary({ ...props, onRetry: () => { called += 1; } });
+    b.state = { failed: true };
+    b.setState = (u: unknown) => { b.state = u as { failed: boolean }; };
+    b.retry();
+    expect(called).toBe(1);
+    expect(b.state.failed).toBe(false);
   });
 });

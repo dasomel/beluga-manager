@@ -2,10 +2,13 @@ import React, { Suspense, useEffect, useRef, useState } from 'react';
 import { Check, Copy, Lock, Terminal } from 'lucide-react';
 import { copyToClipboard } from './clipboard';
 import { SqlStatic } from './SqlStatic';
+import { ChunkErrorBoundary } from './ChunkErrorBoundary';
 import type { EditorTheme } from './sqlEditorTheme';
 
 // Heavy part (CodeMirror) is an async chunk: only views that render a SQL editor pay for it.
-const SqlEditorBody = React.lazy(() => import('./SqlEditorBody'));
+const loadBody = () => React.lazy(() => import('./SqlEditorBody'));
+// React.lazy caches a rejection, so retry swaps in a fresh lazy (a new import()).
+let SqlEditorBody = loadBody();
 
 export interface SqlEditorProps {
   value: string;
@@ -15,6 +18,9 @@ export interface SqlEditorProps {
   label: string;
   /** Announced and shown while the editor chunk loads. */
   loadingLabel: string;
+  /** Shown (with the plain SQL) when the editor chunk fails to load. */
+  loadFailedLabel: string;
+  retryLabel: string;
   title?: string;
   readOnlyBadgeLabel?: string;
   copyLabel: string;
@@ -32,6 +38,8 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
   theme,
   label,
   loadingLabel,
+  loadFailedLabel,
+  retryLabel,
   title,
   readOnlyBadgeLabel,
   copyLabel,
@@ -42,6 +50,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
 }) => {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [isMounted, setIsMounted] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
@@ -101,6 +110,17 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
 
       <div className="relative focus-within:ring-2 focus-within:ring-cyan-500 focus-within:ring-inset">
         {isMounted ? (
+          <ChunkErrorBoundary
+            key={attempt}
+            value={value}
+            label={label}
+            failedLabel={loadFailedLabel}
+            retryLabel={retryLabel}
+            onRetry={() => {
+              SqlEditorBody = loadBody();
+              setAttempt((n) => n + 1);
+            }}
+          >
           <Suspense
             fallback={
               <div aria-busy="true">
@@ -113,6 +133,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
           >
             <SqlEditorBody value={value} theme={theme} label={label} />
           </Suspense>
+          </ChunkErrorBoundary>
         ) : (
           staticFallback
         )}
