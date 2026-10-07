@@ -7,6 +7,8 @@ import type { Pipeline } from "../schema/pipeline.js";
 export interface PipelineSnapshot {
   pipelines: Pipeline[];
   warnings: ListWarning[];
+  /** 상세 조회가 누락되어 sink stage 등이 빠진 pipeline id(목록에는 PARTIAL 경고와 함께 포함됨). */
+  incompletePipelineIds: string[];
 }
 
 // unavailable: upstream를 읽을 수 없어 "없음"과 "모름"을 구분할 수 없는 상태(404가 아니라 503으로 보고).

@@ -5,8 +5,8 @@ import type { ListWarning } from "../../schema/envelope.js";
 import type { HealthStatus } from "../../schema/health.js";
 import type { AdapterHealth, AdapterMetadata, ServiceAdapter } from "../types.js";
 import type { PipelineAdapter, PipelineLookup, PipelineSnapshot } from "../pipelineAdapter.js";
-import { FlinkClientError, FlinkRestClient, type FlinkJobDetail, type FlinkJobSummary, type FlinkOverview } from "./client.js";
-import { buildPipelines, FLINK_SERVICE_ID, PIPELINE_ID_PATTERN, type FlinkJobInput } from "./mapping.js";
+import { FlinkClientError, FlinkRestClient, type FlinkErrorKind, type FlinkJobDetail, type FlinkJobSummary, type FlinkOverview } from "./client.js";
+import { buildPipelines, FLINK_SERVICE_ID, PIPELINE_ID_PATTERN, pipelineIdFor, type FlinkJobInput } from "./mapping.js";
 
 // D1: 상세 조회(/jobs/{id}) 상한. 오래된 job 이력이 많은 클러스터에서 요청 폭주를 막는다.
 const MAX_JOBS = 100;
@@ -19,41 +19,21 @@ export interface FlinkAdapterOptions {
   now?: () => Date;
 }
 
-// 단일 비행(single-flight) + 짧은 TTL 캐시. 동시에 들어온 호출은 하나의 진행 중 작업을 공유하고,
-// 성공은 ttlMs, 실패는 negativeTtlMs 동안 재사용한다(실패 직후 재시도 폭주 방지).
+// 단일 비행(single-flight) + 짧은 TTL 캐시. 동시에 들어온 호출은 하나의 진행 중 작업을 공유하고, 결과는
+// 로더가 정한 ttlMs 동안 재사용한다(0이면 재사용 안 함). 거부(throw)된 결과는 캐시하지 않는다.
 class SingleFlightCache<T> {
-  private entry: { at: number; result: { ok: true; value: T } | { ok: false; error: unknown } } | undefined;
+  private entry: { value: T; expiresAt: number } | undefined;
   private inflight: Promise<T> | undefined;
 
-  constructor(
-    private readonly ttlMs: number,
-    private readonly clock: () => number,
-    private readonly negativeTtlMs = 0,
-  ) {}
+  constructor(private readonly clock: () => number) {}
 
-  peekFresh(): T | undefined {
-    const e = this.entry;
-    return e && e.result.ok && this.clock() - e.at < this.ttlMs ? e.result.value : undefined;
-  }
-
-  get(load: () => Promise<T>): Promise<T> {
-    const e = this.entry;
-    if (e) {
-      const age = this.clock() - e.at;
-      if (e.result.ok && age < this.ttlMs) return Promise.resolve(e.result.value);
-      if (!e.result.ok && age < this.negativeTtlMs) return Promise.reject(e.result.error);
-    }
+  get(load: () => Promise<{ value: T; ttlMs: number }>): Promise<T> {
+    if (this.entry && this.clock() < this.entry.expiresAt) return Promise.resolve(this.entry.value);
     if (!this.inflight) {
-      const p = load().then(
-        (value) => {
-          this.entry = { at: this.clock(), result: { ok: true, value } };
-          return value;
-        },
-        (error: unknown) => {
-          this.entry = { at: this.clock(), result: { ok: false, error } };
-          throw error;
-        },
-      );
+      const p = load().then(({ value, ttlMs }) => {
+        this.entry = { value, expiresAt: this.clock() + ttlMs };
+        return value;
+      });
       this.inflight = p;
       const clear = () => {
         if (this.inflight === p) this.inflight = undefined;
@@ -64,29 +44,15 @@ class SingleFlightCache<T> {
   }
 }
 
-// 키별 SingleFlightCache를 LRU로 제한한다. 키는 외부 입력(jid)에서 오므로 크기가 무한히 자라지 않게 한다.
-class BoundedKeyedCache<T> {
-  private readonly map = new Map<string, SingleFlightCache<T>>();
-
-  constructor(
-    private readonly maxEntries: number,
-    private readonly make: () => SingleFlightCache<T>,
-  ) {}
-
-  get(key: string, load: () => Promise<T>): Promise<T> {
-    let cache = this.map.get(key);
-    if (cache) this.map.delete(key); // 최근 사용 순서로 재삽입
-    else cache = this.make();
-    this.map.set(key, cache);
-    while (this.map.size > this.maxEntries) this.map.delete(this.map.keys().next().value as string);
-    return cache.get(load);
-  }
-}
-
-// D4: by-id 경로의 job 상세 캐시 항목 수 상한(LRU). 요청이 존재하는 job의 jid만 키로 쓰지만 그래도 제한한다.
-const DETAIL_CACHE_MAX_ENTRIES = 256;
-// 실패는 짧게만(최대 1s) 기억한다.
+// D4: 일시적 실패(대기열 포화, timeout, 연결 불가)는 절대 캐시하지 않는다 — 부하 때문에 거부된 결과가 TTL 동안
+// 그대로 서빙되면 안 된다. 실제 upstream 응답 오류(http-error, invalid-response)만 최대 1s 짧게 기억한다.
+const TRANSIENT_KINDS = new Set<FlinkErrorKind>(["overloaded", "timeout", "unreachable"]);
 const NEGATIVE_TTL_CAP_MS = 1000;
+
+interface BuiltSnapshot {
+  value: PipelineSnapshot;
+  ttlMs: number;
+}
 
 export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
   readonly id = FLINK_SERVICE_ID;
@@ -98,9 +64,6 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
   private readonly now: () => Date;
   private readonly overviewCache: SingleFlightCache<FlinkOverview>;
   private readonly snapshotCache: SingleFlightCache<PipelineSnapshot>;
-  // GET-by-id 전용: job 목록(요약)과 job별 상세를 단일 비행 + 짧은 TTL로 공유한다.
-  private readonly summariesCache: SingleFlightCache<FlinkJobSummary[]>;
-  private readonly detailCache: BoundedKeyedCache<FlinkJobDetail>;
 
   constructor(private readonly options: FlinkAdapterOptions) {
     const { config } = options;
@@ -113,16 +76,13 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
     });
     this.now = options.now ?? (() => new Date());
     const clock = () => this.now().getTime();
-    this.overviewCache = new SingleFlightCache(config.cacheTtlMs, clock);
-    this.snapshotCache = new SingleFlightCache(config.cacheTtlMs, clock);
-    const negative = Math.min(config.cacheTtlMs, NEGATIVE_TTL_CAP_MS);
-    this.summariesCache = new SingleFlightCache(config.cacheTtlMs, clock, negative);
-    this.detailCache = new BoundedKeyedCache(DETAIL_CACHE_MAX_ENTRIES, () => new SingleFlightCache(config.cacheTtlMs, clock, negative));
+    this.overviewCache = new SingleFlightCache(clock);
+    this.snapshotCache = new SingleFlightCache(clock);
   }
 
   // registry가 metadata/version/health를 병렬로 부르므로 하나의 요청을 공유하고 TTL 동안 재사용한다.
   private overview(): Promise<FlinkOverview> {
-    return this.overviewCache.get(() => this.client.getOverview());
+    return this.overviewCache.get(async () => ({ value: await this.client.getOverview(), ttlMs: this.options.config.cacheTtlMs }));
   }
 
   async getMetadata(): Promise<AdapterMetadata> {
@@ -171,22 +131,36 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
     return { status, lastCheckedAt: this.now().toISOString(), staleAfterMs: STALE_AFTER_MS };
   }
 
-  // 한 번의 구성은 1 /jobs/overview + 최대 MAX_JOBS개의 /jobs/{id}이며, 동시 호출은 합쳐지고 TTL 동안 캐시된다.
+  // 한 번의 구성은 1 /jobs/overview + 최대 MAX_JOBS개의 /jobs/{id}이며, 동시 호출은 합쳐지고 완전한 결과는 TTL 동안 캐시된다.
   listPipelines(): Promise<PipelineSnapshot> {
     return this.snapshotCache.get(() => this.buildSnapshot());
   }
 
-  private async buildSnapshot(): Promise<PipelineSnapshot> {
+  private async buildSnapshot(): Promise<BuiltSnapshot> {
+    const { cacheTtlMs, snapshotBudgetMs, maxConcurrency, jobNamePrefix } = this.options.config;
     const warnings: ListWarning[] = [];
+    const incompletePipelineIds: string[] = [];
+    let transient = false; // 일시적 실패가 하나라도 있으면 이 결과는 캐시하지 않는다.
+    let genuine = false; // 실제 upstream 응답 오류만 있으면 짧게(<=1s) 캐시한다.
+    const note = (err: unknown) => {
+      if (err instanceof FlinkClientError && !TRANSIENT_KINDS.has(err.kind)) genuine = true;
+      else transient = true;
+    };
+    const result = (snapshot: PipelineSnapshot): BuiltSnapshot => ({
+      value: snapshot,
+      ttlMs: transient ? 0 : genuine ? Math.min(cacheTtlMs, NEGATIVE_TTL_CAP_MS) : cacheTtlMs,
+    });
+
     // 전체 시간 예산: 초과하면 진행 중/대기 중 요청을 abort하고 읽은 만큼만 반환한다.
     const budget = new AbortController();
-    const timer = setTimeout(() => budget.abort(), this.options.config.snapshotBudgetMs);
+    const timer = setTimeout(() => budget.abort(), snapshotBudgetMs);
     try {
       let summaries: FlinkJobSummary[];
       try {
         summaries = await this.client.getJobsOverview(budget.signal);
       } catch (err) {
-        return { pipelines: [], warnings: [warningFor(err)] };
+        note(err);
+        return result({ pipelines: [], warnings: [warningFor(err)], incompletePipelineIds });
       }
 
       const selected = summaries.slice(0, MAX_JOBS);
@@ -198,83 +172,70 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
         });
       }
 
-      const details = await mapLimited(selected, this.options.config.maxConcurrency, async (s): Promise<FlinkJobDetail | undefined> => {
-        if (budget.signal.aborted) return undefined;
-        try {
-          return await this.client.getJob(s.jid, budget.signal);
-        } catch {
-          return undefined;
+      const outcomes = await mapLimited(
+        selected,
+        maxConcurrency,
+        async (s): Promise<{ detail: FlinkJobDetail } | { error: unknown }> => {
+          if (budget.signal.aborted) return { error: new FlinkClientError("timeout", "snapshot time budget exceeded") };
+          try {
+            return { detail: await this.client.getJob(s.jid, budget.signal) };
+          } catch (error) {
+            return { error };
+          }
+        },
+      );
+      const inputs: FlinkJobInput[] = [];
+      selected.forEach((summary, i) => {
+        const outcome = outcomes[i]!;
+        if ("detail" in outcome) {
+          inputs.push({ summary, detail: outcome.detail });
+        } else {
+          note(outcome.error);
+          incompletePipelineIds.push(pipelineIdFor(summary.jid));
+          inputs.push({ summary });
         }
       });
-      const inputs: FlinkJobInput[] = selected.map((summary, i) => {
-        const detail = details[i];
-        return detail ? { summary, detail } : { summary };
-      });
-      const missing = details.filter((d) => d === undefined).length;
-      if (missing > 0) {
+      if (incompletePipelineIds.length > 0) {
         warnings.push({
           code: "PARTIAL",
           message:
-            `Flink job details were unavailable for ${missing} job(s)` +
+            `Flink job details were unavailable for ${incompletePipelineIds.length} job(s)` +
             `${budget.signal.aborted ? " (snapshot time budget exceeded)" : ""}; their sink tables are not shown`,
           serviceId: FLINK_SERVICE_ID,
         });
       }
 
-      const { pipelines, skipped } = buildPipelines(inputs, {
-        jobNamePrefix: this.options.config.jobNamePrefix,
-        now: this.now(),
-      });
+      const { pipelines, skipped } = buildPipelines(inputs, { jobNamePrefix, now: this.now() });
       if (skipped > 0) {
+        genuine = true;
         warnings.push({
           code: "INVALID_JOB",
           message: `${skipped} Flink job(s) could not be mapped to a Pipeline and were skipped`,
           serviceId: FLINK_SERVICE_ID,
         });
       }
-      return { pipelines, warnings };
+      return result({ pipelines, warnings, incompletePipelineIds });
     } finally {
       clearTimeout(timer);
     }
   }
 
-  // 단일 Pipeline 조회: 신선한 snapshot이 있으면 그것을, 없으면 /jobs/overview 1회 + 해당 job의 /jobs/{id} 1회만 읽는다.
+  // 단일 Pipeline 조회는 list와 같은 snapshot(단일 비행 + TTL 캐시)에서 꺼낸다 — 요청 수/서로 다른 id 수와
+  // 무관하게 upstream 비용은 snapshot 1회 구성(TTL당)이다. 완전한 객체를 줄 수 없으면(상세 누락) 깨끗한
+  // 200이 아니라 unavailable(503)로 보고한다: 단건 응답에는 warnings 필드가 없기 때문이다.
   async getPipeline(id: string): Promise<PipelineLookup> {
-    const match = PIPELINE_ID_PATTERN.exec(id);
-    if (!match) return { pipeline: undefined, warnings: [], unavailable: false };
-    const jid = match[1]!;
+    if (!PIPELINE_ID_PATTERN.test(id)) return { pipeline: undefined, warnings: [], unavailable: false };
 
-    const fresh = this.snapshotCache.peekFresh();
-    if (fresh) {
-      const unavailable = fresh.warnings.some((w) => w.code === "UPSTREAM_UNAVAILABLE");
-      return { pipeline: fresh.pipelines.find((p) => p.id === id), warnings: fresh.warnings, unavailable };
+    const snap = await this.listPipelines();
+    if (snap.warnings.some((w) => w.code === "UPSTREAM_UNAVAILABLE")) {
+      return { pipeline: undefined, warnings: snap.warnings, unavailable: true };
     }
-
-    let summaries: FlinkJobSummary[];
-    try {
-      summaries = await this.summariesCache.get(() => this.client.getJobsOverview());
-    } catch (err) {
-      return { pipeline: undefined, warnings: [warningFor(err)], unavailable: true };
+    const pipeline = snap.pipelines.find((p) => p.id === id);
+    if (pipeline && snap.incompletePipelineIds.includes(id)) {
+      const partial = snap.warnings.filter((w) => w.code === "PARTIAL");
+      return { pipeline: undefined, warnings: partial, unavailable: true };
     }
-    const summary = summaries.find((s) => s.jid === jid);
-    if (!summary) return { pipeline: undefined, warnings: [], unavailable: false };
-
-    const warnings: ListWarning[] = [];
-    let detail: FlinkJobDetail | undefined;
-    try {
-      detail = await this.detailCache.get(jid, () => this.client.getJob(jid));
-    } catch {
-      warnings.push({
-        code: "PARTIAL",
-        message: "Flink job details were unavailable; its sink tables are not shown",
-        serviceId: FLINK_SERVICE_ID,
-      });
-    }
-    const { pipelines } = buildPipelines([detail ? { summary, detail } : { summary }], {
-      jobNamePrefix: this.options.config.jobNamePrefix,
-      now: this.now(),
-    });
-    return { pipeline: pipelines[0], warnings, unavailable: false };
+    return { pipeline, warnings: [], unavailable: false };
   }
 }
 

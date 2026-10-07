@@ -383,19 +383,6 @@ test("전역 동시성 상한은 snapshot과 services 호출을 합쳐서도 지
   expect(calls.maxActive).toBeLessThanOrEqual(3);
 });
 
-test("GET by id는 전체 목록이 아니라 해당 job의 상세 1건만 읽는다", async () => {
-  const { impl, calls, jobs } = countingFetch(50);
-  const adapter = adapterWith(impl);
-  const target = jobs[7]!["jid"] as string;
-  const lookups = await Promise.all(Array.from({ length: 10 }, () => adapter.getPipeline(`pl-flink-${target}`)));
-
-  expect(calls.jobsOverview).toBe(1); // 동시 호출 합치기
-  expect(calls.detail).toBe(1);
-  expect(lookups[0]!.pipeline?.name).toBe("beluga-job_7");
-  expect((await adapter.getPipeline(`pl-flink-${"f".repeat(32)}`)).pipeline).toBeUndefined();
-  expect((await adapter.getPipeline("pl-lakehouse-ingest")).unavailable).toBe(false);
-});
-
 test("GET by id는 신선한 snapshot 캐시가 있으면 upstream을 호출하지 않는다", async () => {
   const { impl, calls, jobs } = countingFetch(5);
   const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
@@ -478,38 +465,6 @@ test("서로 다른 유효 jid를 대량으로 by-id 조회해도 upstream 호�
   expect(calls.detail).toBe(100);
 });
 
-test("같은 id를 반복 조회하면 TTL당 1회만 읽고 만료되면 다시 읽는다", async () => {
-  const { impl, calls, jobs } = countingFetch(5);
-  let nowMs = Date.parse("2026-10-07T00:00:00Z");
-  const adapter = new FlinkAdapter({ config: { ...config, cacheTtlMs: 5000 }, fetchImpl: impl, now: () => new Date(nowMs) });
-  const id = `pl-flink-${jobs[1]!["jid"] as string}`;
-
-  for (let i = 0; i < 50; i++) await adapter.getPipeline(id);
-  expect(calls.detail).toBe(1);
-  nowMs += 5001;
-  await adapter.getPipeline(id);
-  expect(calls.detail).toBe(2);
-  expect(calls.jobsOverview).toBe(2);
-});
-
-test("실패한 상세 조회는 짧게 negative cache되어 재시도 폭주를 막는다", async () => {
-  let detailCalls = 0;
-  const jobs = (fixture("jobs-overview.json") as { jobs: unknown[] }).jobs;
-  const impl = (async (input: string | URL | Request) => {
-    const path = new URL(String(input)).pathname;
-    if (path === "/jobs/overview") return json({ jobs });
-    detailCalls += 1;
-    return new Response("{}", { status: 500 });
-  }) as typeof fetch;
-  const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
-  for (let i = 0; i < 20; i++) {
-    const r = await adapter.getPipeline(`pl-flink-${JIDS.orders}`);
-    expect(r.pipeline).toBeDefined(); // job 자체는 투영되고
-    expect(r.warnings.map((w) => w.code)).toEqual(["PARTIAL"]); // 상세 누락은 경고로 표시된다.
-  }
-  expect(detailCalls).toBe(1);
-});
-
 // ---- client 대기열 ----
 function gate() {
   let release!: () => void;
@@ -566,4 +521,135 @@ test("대기열이 가득 차면 adapter는 health를 unknown으로 낮춘다", 
   expect(other.status).toBe("unknown");
   g.release();
   await busy;
+});
+
+// ---- 라운드 3: by-id는 list와 같은 snapshot에서, 불완전하면 503, 일시 실패는 캐시하지 않음 ----
+
+test("by-id는 snapshot 1회 구성으로 처리되고 동시 호출은 합쳐진다", async () => {
+  const { impl, calls, jobs } = countingFetch(50);
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
+  const lookups = await Promise.all(jobs.slice(0, 10).map((j) => adapter.getPipeline(`pl-flink-${j["jid"] as string}`)));
+
+  expect(lookups.every((l) => l.pipeline !== undefined && !l.unavailable)).toBe(true);
+  expect(calls.jobsOverview).toBe(1);
+  expect(calls.detail).toBe(50); // snapshot 1회: job당 상세 1건
+});
+
+test("같은 id를 반복 조회하면 TTL당 snapshot 1회이고 만료되면 다시 읽는다", async () => {
+  const { impl, calls, jobs } = countingFetch(5);
+  let nowMs = Date.parse("2026-10-07T00:00:00Z");
+  const adapter = new FlinkAdapter({ config: { ...config, cacheTtlMs: 5000 }, fetchImpl: impl, now: () => new Date(nowMs) });
+  const id = `pl-flink-${jobs[1]!["jid"] as string}`;
+
+  for (let i = 0; i < 50; i++) await adapter.getPipeline(id);
+  expect(calls.jobsOverview).toBe(1);
+  nowMs += 5001;
+  await adapter.getPipeline(id);
+  expect(calls.jobsOverview).toBe(2);
+});
+
+test("서로 다른 id가 캐시 크기(256)를 넘어도 upstream 비용은 TTL당 snapshot 1회(<=1+100)로 유지된다", async () => {
+  const { impl, calls } = countingFetch(300);
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000, maxQueue: 1000 });
+  const ids = Array.from({ length: 300 }, (_, i) => `pl-flink-${i.toString(16).padStart(32, "0")}`);
+  const burst = () => Promise.all(ids.map((id) => adapter.getPipeline(id)));
+
+  const first = await burst();
+  const afterFirst = calls.jobsOverview + calls.detail;
+  expect(afterFirst).toBe(1 + 100); // MAX_JOBS 상한
+  const second = await burst();
+  expect(calls.jobsOverview + calls.detail).toBe(afterFirst); // 반복은 upstream 호출 0
+  expect(second).toEqual(first);
+  // 상한(100) 밖의 job은 목록과 같이 주소 지정되지 않는다(문서화된 한계).
+  expect(first.filter((l) => l.pipeline !== undefined)).toHaveLength(100);
+});
+
+test("상세가 누락된(불완전한) pipeline은 by-id에서 깨끗한 200이 아니라 unavailable(503)이다 — list에는 PARTIAL로 남는다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const impl = (async (input: string | URL | Request) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/jobs/overview") return json(fixture("jobs-overview.json"));
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
+  const id = `pl-flink-${JIDS.orders}`;
+
+  const lookup = await adapter.getPipeline(id);
+  expect(lookup.unavailable).toBe(true);
+  expect(lookup.pipeline).toBeUndefined();
+  expect(lookup.warnings.map((w) => w.code)).toEqual(["PARTIAL"]);
+  const list = await adapter.listPipelines();
+  expect(list.pipelines.find((p) => p.id === id)).toBeDefined();
+  expect(list.warnings.map((w) => w.code)).toEqual(["PARTIAL"]);
+
+  const app = createApp(undefined, undefined, adapter);
+  const res = await app.request(`/api/v1/pipelines/${id}`);
+  expect(res.status).toBe(503);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe("SERVICE_UNAVAILABLE");
+});
+
+test("실제 upstream 오류(500)는 최대 1s만 기억되어 재시도 폭주를 막는다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  let detailCalls = 0;
+  const jobs = (fixture("jobs-overview.json") as { jobs: unknown[] }).jobs;
+  const impl = (async (input: string | URL | Request) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/jobs/overview") return json({ jobs });
+    detailCalls += 1;
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  let nowMs = Date.parse("2026-10-07T00:00:00Z");
+  const adapter = new FlinkAdapter({ config: { ...config, cacheTtlMs: 5000 }, fetchImpl: impl, now: () => new Date(nowMs) });
+  for (let i = 0; i < 20; i++) expect((await adapter.getPipeline(`pl-flink-${JIDS.orders}`)).unavailable).toBe(true);
+  expect(detailCalls).toBe(3); // job 3개의 상세 각 1회(snapshot 1회)
+  nowMs += 1001;
+  await adapter.getPipeline(`pl-flink-${JIDS.orders}`);
+  expect(detailCalls).toBe(6);
+});
+
+test("overloaded/timeout 상세 실패는 by-id에서 unavailable이며 캐시되지 않아 복구 즉시 반영된다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  for (const mode of ["overloaded", "timeout"] as const) {
+    let healthy = false;
+    const hang = (_i: unknown, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    const impl = ((input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (healthy) return Promise.resolve(path === "/jobs/overview" ? json(fixture("jobs-overview.json")) : json(liveDetails[path.replace("/jobs/", "") as keyof typeof liveDetails]));
+      if (path === "/jobs/overview") return Promise.resolve(json(fixture("jobs-overview.json")));
+      return hang(input, init);
+    }) as typeof fetch;
+    // overloaded: 동시성 1 + 대기열 0 이면 두 번째 상세부터 즉시 거부. timeout: 상세가 응답하지 않음.
+    const overrides = mode === "overloaded" ? { maxConcurrency: 1, maxQueue: 0, timeoutMs: 30 } : { timeoutMs: 30 };
+    const adapter = adapterWith(impl, { cacheTtlMs: 5000, ...overrides });
+    const ids = [JIDS.orders, JIDS.customers, JIDS.events].map((j) => `pl-flink-${j}`);
+
+    const during = await Promise.all(ids.map((id) => adapter.getPipeline(id)));
+    expect(during.filter((l) => l.pipeline !== undefined && !l.unavailable)).toHaveLength(0); // 불완전한 객체는 깨끗하게 나가지 않는다
+    expect(during.every((l) => l.unavailable)).toBe(true);
+
+    healthy = true; // 복구: 일시 실패는 캐시되지 않으므로 바로 완전한 객체가 나온다.
+    const after = await adapter.getPipeline(ids[0]!);
+    expect(after.unavailable).toBe(false);
+    expect(after.pipeline?.stages.map((s) => s.serviceType)).toEqual(["flink", "iceberg"]);
+  }
+});
+
+test("list의 일시 실패 snapshot도 캐시되지 않고, 경고가 응답에 남는다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  let healthy = false;
+  const impl = ((input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/jobs/overview") return Promise.resolve(json(fixture("jobs-overview.json")));
+    if (healthy) return Promise.resolve(json(liveDetails[path.replace("/jobs/", "") as keyof typeof liveDetails]));
+    return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+  }) as typeof fetch;
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000, timeoutMs: 30 });
+
+  const degraded = await adapter.listPipelines();
+  expect(degraded.warnings.map((w) => w.code)).toEqual(["PARTIAL"]);
+  healthy = true;
+  const recovered = await adapter.listPipelines();
+  expect(recovered.warnings).toEqual([]);
+  expect(recovered.pipelines.every((p) => p.stages.length === 2)).toBe(true);
 });

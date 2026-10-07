@@ -57,7 +57,7 @@ const getByIdRoute = createRoute({
 // 어댑터가 없으면(기본) stub fixture. 어댑터가 있으면 라이브 결과만 쓴다 — 가짜 stub과 실제 데이터를
 // 한 목록에 섞지 않는다. 어댑터는 throw하지 않고 실패를 warnings로 돌려준다.
 async function loadSnapshot(adapter: PipelineAdapter | undefined): Promise<PipelineSnapshot> {
-  return adapter ? adapter.listPipelines() : { pipelines, warnings: [] };
+  return adapter ? adapter.listPipelines() : { pipelines, warnings: [], incompletePipelineIds: [] };
 }
 
 export function registerPipelineRoutes(app: OpenAPIHono, adapter?: PipelineAdapter) {
