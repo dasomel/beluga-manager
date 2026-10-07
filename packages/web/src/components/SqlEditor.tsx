@@ -4,11 +4,15 @@ import { copyToClipboard } from './clipboard';
 import { SqlStatic } from './SqlStatic';
 import { ChunkErrorBoundary } from './ChunkErrorBoundary';
 import type { EditorTheme } from './sqlEditorTheme';
+import { createRetryableLoader } from './retryableLoader';
+import type { SqlEditorBodyProps } from './SqlEditorBody';
 
 // Heavy part (CodeMirror) is an async chunk: only views that render a SQL editor pay for it.
-const loadBody = () => React.lazy(() => import('./SqlEditorBody'));
-// React.lazy caches a rejection, so retry swaps in a fresh lazy (a new import()).
-let SqlEditorBody = loadBody();
+const newBodyLoader = () =>
+  createRetryableLoader<SqlEditorBodyProps>(() => import('./SqlEditorBody'));
+// Shared while healthy (no re-suspend per mount). A retry gives only the retrying instance its own
+// loader (D2), so a retry here never remounts a healthy editor elsewhere.
+const sharedBodyLoader = newBodyLoader();
 
 export interface SqlEditorProps {
   value: string;
@@ -51,6 +55,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [isMounted, setIsMounted] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const ownLoader = useRef<ReturnType<typeof newBodyLoader> | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
@@ -69,6 +74,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
     copyState === 'copied' ? copiedLabel : copyState === 'failed' ? copyFailedLabel : '';
   const buttonText = copyState === 'copied' ? copiedLabel : copyLabel;
 
+  const LoadedBody = (ownLoader.current ?? sharedBodyLoader).component();
   const staticFallback = <SqlStatic value={value} label={label} />;
 
   return (
@@ -117,7 +123,8 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
             failedLabel={loadFailedLabel}
             retryLabel={retryLabel}
             onRetry={() => {
-              SqlEditorBody = loadBody();
+              if (!ownLoader.current) ownLoader.current = newBodyLoader();
+              else if (!ownLoader.current.retry()) return;
               setAttempt((n) => n + 1);
             }}
           >
@@ -131,7 +138,7 @@ export const SqlEditor: React.FC<SqlEditorProps> = ({
               </div>
             }
           >
-            <SqlEditorBody value={value} theme={theme} label={label} />
+            <LoadedBody value={value} theme={theme} label={label} />
           </Suspense>
           </ChunkErrorBoundary>
         ) : (

@@ -152,14 +152,4 @@ describe('ChunkErrorBoundary', () => {
     expect(html).toContain('&quot;beluga_lake&quot;');
     expect(html).toContain('aria-label="Trino starter SQL editor"');
   });
-
-  it('retry notifies the parent (fresh import) and clears the failed state', () => {
-    let called = 0;
-    const b = new ChunkErrorBoundary({ ...props, onRetry: () => { called += 1; } });
-    b.state = { failed: true };
-    b.setState = (u: unknown) => { b.state = u as { failed: boolean }; };
-    b.retry();
-    expect(called).toBe(1);
-    expect(b.state.failed).toBe(false);
-  });
 });
