@@ -35,6 +35,8 @@ export function findNextNodeId(
   currentId: string,
   key: NavigationKey,
 ): string | null {
+  // Non-finite coordinates (NaN/Infinity) would poison scores and sort order: ignore such nodes.
+  points = points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   if (points.length === 0) return null;
   const current = points.find((p) => p.id === currentId);
 

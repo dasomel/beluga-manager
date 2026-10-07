@@ -74,7 +74,7 @@ describe('TopologyGraph', () => {
   });
 
   it('includes keyboard navigation attributes and focus visible styles on nodes', () => {
-    const html = renderToStaticMarkup(<TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} />);
+    const html = renderToStaticMarkup(<TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} onSelectNode={() => {}} />);
     expect(html).toContain('tabindex="0"');
     expect(html).toContain('role="button"');
     expect(html).toContain('data-topology-node="true"');
@@ -130,7 +130,7 @@ describe('TopologyGraph', () => {
   });
 
   describe('keyboard and focus structure', () => {
-    const html = renderToStaticMarkup(<TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} />);
+    const html = renderToStaticMarkup(<TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} onSelectNode={() => {}} />);
 
     it('has exactly one Tab stop for the whole graph (roving tabindex)', () => {
       const inGraph = html.slice(html.indexOf('react-flow__nodes'), html.indexOf('react-flow__controls') - 60);
@@ -140,11 +140,18 @@ describe('TopologyGraph', () => {
 
     it('makes the first node the Tab stop by default and the selected node when there is a selection', () => {
       const sel = renderToStaticMarkup(
-        <TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} selectedNodeId={testNodes[1]!.id} />,
+        <TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} selectedNodeId={testNodes[1]!.id} onSelectNode={() => {}} />,
       );
       expect(html).toMatch(/tabindex="0"[^>]*aria-pressed="false"[^>]*aria-label="Kafka topic: orders/);
       expect(sel).toMatch(/tabindex="-1"[^>]*aria-pressed="false"[^>]*aria-label="Kafka topic: orders/);
       expect(sel).toMatch(/tabindex="0"[^>]*aria-pressed="true"[^>]*aria-label="Flink job: orders-sync/);
+    });
+
+    it('read-only graphs (no onSelectNode) keep focus and names but drop button/pressed semantics', () => {
+      const ro = renderToStaticMarkup(<TopologyGraph t={tEn} nodes={testNodes} edges={testEdges} />);
+      expect(ro).not.toContain('role="button"');
+      expect(ro).not.toContain('aria-pressed="false" aria-label="Kafka');
+      expect(ro).toMatch(/role="group"[^>]*tabindex="0"[^>]*aria-label="Kafka topic: orders/);
     });
 
     it('neutralises the xyflow node wrapper (no tabindex, no group role, no roledescription, no raw-id descriptions)', () => {

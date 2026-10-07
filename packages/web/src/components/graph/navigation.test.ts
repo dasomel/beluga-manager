@@ -68,6 +68,23 @@ describe('findNextNodeId', () => {
   });
 });
 
+describe('findNextNodeId with non-finite coordinates', () => {
+  const bad = (id: string, x: number, y: number): NavigablePoint => ({ id, x, y });
+  it('skips NaN/Infinity candidates instead of letting them win', () => {
+    const pts = [bad('a', 0, 0), bad('n', NaN, 0), bad('b', 300, 0), bad('i', Infinity, 0)];
+    expect(findNextNodeId(pts, 'a', 'ArrowRight')).toBe('b');
+  });
+  it('returns null when the current node itself is non-finite', () => {
+    expect(findNextNodeId([bad('n', NaN, 0), bad('b', 300, 0)], 'n', 'ArrowRight')).toBeNull();
+  });
+  it('keeps Home/End stable by ignoring non-finite nodes', () => {
+    const pts = [bad('n', NaN, NaN), bad('b', 300, 0), bad('a', 0, 0)];
+    expect(findNextNodeId(pts, 'b', 'Home')).toBe('a');
+    expect(findNextNodeId(pts, 'a', 'End')).toBe('b');
+    expect(findNextNodeId([bad('n', NaN, 0)], 'n', 'Home')).toBeNull();
+  });
+});
+
 describe('isNavigationKey', () => {
   it('accepts arrows plus Home/End and rejects the rest', () => {
     for (const k of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End']) expect(isNavigationKey(k)).toBe(true);

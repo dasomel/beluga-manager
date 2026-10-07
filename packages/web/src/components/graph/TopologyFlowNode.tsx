@@ -11,6 +11,8 @@ export interface TopologyFlowNodeData extends Record<string, unknown> {
   isSelected: boolean;
   /** Roving tabindex: exactly one node of a graph is the Tab stop (tabIndex 0), the rest are -1. */
   isTabStop: boolean;
+  /** false when no onSelectNode is wired: node is read-only (no button/pressed semantics). */
+  interactive: boolean;
   onSelect?: (nodeId: string) => void;
   onFocusNode?: (nodeId: string) => void;
 }
@@ -23,10 +25,10 @@ export type TopologyFlowNodeType = Node<TopologyFlowNodeData, 'topology'>;
  * handled once per graph container (see TopologyGraph), not here.
  */
 export function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeType>) {
-  const { node, t, isSelected, isTabStop, onSelect, onFocusNode } = data;
+  const { node, t, isSelected, isTabStop, interactive, onSelect, onFocusNode } = data;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (interactive && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       onSelect?.(node.id);
     }
@@ -38,17 +40,17 @@ export function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeType>) {
 
   return (
     <div
-      role="button"
+      role={interactive ? 'button' : 'group'}
       tabIndex={isTabStop ? 0 : -1}
       data-topology-node="true"
       data-node-id={node.id}
-      aria-pressed={isSelected}
+      aria-pressed={interactive ? isSelected : undefined}
       data-selected={isSelected ? 'true' : undefined}
       aria-label={accessibleName}
-      onClick={() => onSelect?.(node.id)}
+      onClick={interactive ? () => onSelect?.(node.id) : undefined}
       onKeyDown={handleKeyDown}
       onFocus={() => onFocusNode?.(node.id)}
-      className={`w-[220px] rounded-xl border bg-white dark:bg-slate-900 p-3.5 shadow-xs transition-all motion-reduce:transition-none cursor-pointer text-left ${FOCUS_RING_CLASS} ${
+      className={`w-[220px] rounded-xl border bg-white dark:bg-slate-900 p-3.5 shadow-xs transition-all motion-reduce:transition-none ${interactive ? 'cursor-pointer' : 'cursor-default'} text-left ${FOCUS_RING_CLASS} ${
         isSelected
           ? SELECTION_CLASS
           : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'

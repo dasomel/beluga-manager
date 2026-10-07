@@ -100,6 +100,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
           t,
           isSelected: selectedNodeId === node.id,
           isTabStop: tabStopId === node.id,
+          interactive: onSelectNode !== undefined,
           onSelect: onSelectNode,
           onFocusNode: setActiveId,
         },
