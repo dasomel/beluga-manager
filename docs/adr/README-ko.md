@@ -14,6 +14,7 @@ ADR-0001의 프론트엔드 선택을 전제로 하고, ADR-0003의 컴포넌트
 | [0005](0005-deployment-gitops-integration-ko.md) | Beluga와의 배포 및 GitOps 통합 | 제안됨 — 설계 방향만; chart/Application 미구현 | 2026-10-01 |
 | [0006](0006-safe-actions-ko.md) | 안전한 운영 조치(Safe Actions) — 제어된 운영 조치 모델 | 제안됨 — 설계 제안; 2단계 미리보기/실행 프레임워크; 인증·인가가 필수 선행 조건; Phase 1은 미리보기 전용, 첫 실행 조치는 Airflow DAG 트리거; Flink 조치는 보류 | 2026-10-07 |
 | [0007](0007-observability-integration-ko.md) | 관측성 통합(Observability Integration) — 메트릭, 로그 및 이벤트 | 제안됨 — 설계 제안; 무저장 어댑터 모델, Grafana Explore 딥링크 우선, 성능 저하 상태 폴백 | 2026-10-07 |
+| [0008](0008-gitops-argocd-integration-ko.md) | ArgoCD 기반 GitOps 통합 — 배포 및 동기화 가시성 모델 | 제안됨 — 설계 제안; 읽기 전용 ArgoCD API 어댑터, 조회 대 변경 분리, 과거 운영 함정 대응 | 2026-10-07 |
 
 ## ADR-0001~0003으로 아직 닫히지 않는 것
 
