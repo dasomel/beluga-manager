@@ -20,7 +20,7 @@ Beluga Manager는 Beluga 데이터 플랫폼 위의 통합 계층입니다. `AGE
 
 | 사실 | 근거 |
 |---|---|
-| Domain API에는 **인증 미들웨어가 없고** 호출자별 인가도 없습니다. | `docs/IMPLEMENTATION-STATUS.md:30` ("the app has no auth middleware"); `packages/domain-api/src/app.ts:46-52`는 CORS 미들웨어(origin `http://localhost:5180`)만 등록합니다. CORS는 인증이나 CSRF 방어가 아닙니다. |
+| Domain API에는 **인증 미들웨어가 없고** 호출자별 인가도 없습니다. | `docs/IMPLEMENTATION-STATUS.md:30` ("the app has no auth middleware"); `packages/domain-api/src/app.ts:50-56`는 CORS 미들웨어(origin `http://localhost:5180`)만 등록합니다. CORS는 인증이나 CSRF 방어가 아닙니다. |
 | Domain API에는 DB/캐시 의존성(Postgres/Redis 클라이언트)이 없습니다. | `grep -rn -i "postgres\|redis" packages/domain-api/package.json packages/domain-api/src` 결과는 정책 타깃 enum/픽스처 문자열(`schema/policy.ts`, `stub-data/policies.ts`)뿐이며 클라이언트가 아닙니다. |
 | Flink는 Flink Kubernetes Operator 아래 `FlinkDeployment/flink-cluster`(ns `streaming`)로 동작하며 **`spec.job`이 없는 세션 클러스터**입니다. | Beluga `gitops/charts/beluga-data/templates/05-flink-operator.yaml:1-9`(`job:` 블록 없음); 라이브 `kubectl -n streaming get flinkdeployment flink-cluster -o jsonpath='{.spec.job}'`은 빈 값, 라이프사이클 `STABLE`; `kubectl get flinksessionjob -A`는 "No resources found". |
 | Flink 잡은 오퍼레이터 CR이 아니라 ArgoCD **Sync 훅** Job(`flink-sql-submit`)이 `sql-client.sh`로 `flink-cluster-rest:8081`에 제출합니다. 훅은 sync마다 재실행되며 **활성 상태가 아닌 파이프라인은 재제출합니다. FAILED/CANCELED/FINISHED는 의도적으로 "재제출 대상"(원하는 자동 복구)입니다**. | Beluga `gitops/charts/beluga-data/templates/14-flink-jobs.yaml:22-28`(훅 애노테이션), `:151-154`(D2 주석, `ACTIVE_STATE_RE`), `:189`의 `submit()` 함수. 라이브: `kubectl -n streaming get jobs`에서 `flink-sql-submit` Complete. |
