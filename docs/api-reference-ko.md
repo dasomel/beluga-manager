@@ -55,13 +55,19 @@ Domain API는 엔드포인트를 `/api/v1` 아래 9개의 리소스 그룹으로
 |---|---|---|
 | `BELUGA_FLINK_REST_URL` | 미설정(adapter 비활성) | Flink JobManager REST origin (예: `http://flink-cluster-rest.streaming:8081`). `http`/`https`여야 하며 경로와 내장 자격증명은 허용되지 않습니다. |
 | `BELUGA_FLINK_TIMEOUT_MS` | `2000` | 요청별 timeout, 1~30000 사이 정수. |
+| `BELUGA_FLINK_CACHE_TTL_MS` | `5000` | pipeline snapshot(및 `/overview` 결과)을 재사용하는 시간, 0~60000 정수. `0`이면 재사용하지 않습니다(동시 호출 합치기는 유지). |
+| `BELUGA_FLINK_SNAPSHOT_BUDGET_MS` | `5000` | snapshot 1회를 구성하는 전체 시간 예산, 1~60000 정수. 초과하면 대기 중 요청을 abort하고 그때까지 읽은 job을 `PARTIAL` 경고와 함께 반환합니다(`/jobs/overview`조차 못 받으면 `UPSTREAM_UNAVAILABLE`). |
+| `BELUGA_FLINK_MAX_CONCURRENCY` | `8` | 모든 route를 합친 JobManager 진행 중 요청의 전역 상한, 1~32 정수. |
 | `BELUGA_FLINK_JOB_NAME_PREFIX` | `beluga-` | 이름 규약 correlation 전에 Flink job 이름에서 제거하는 접두어(`beluga-cdc_orders`는 `cdc_orders`로 비교). |
 
 활성화 시 동작:
 
 - `GET /overview`, `GET /jobs/overview`, `GET /jobs/{jobid}`만 호출합니다([Flink 1.20 REST API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/rest_api/)). 클라이언트에는 변경성 요청이 존재하지 않습니다.
-- `GET /api/v1/services`의 `svc-flink`는 adapter가 제공합니다(version/key metrics는 `/overview`에서, `endpoint`는 노출하지 않음). `GET /api/v1/pipelines`는 **라이브 Flink pipeline만** 반환합니다(Flink job 하나당 Pipeline 하나, id `pl-flink-<job 이름 slug>`). stub pipeline은 섞지 않습니다.
-- 실패는 route에 오류로 전파되지 않습니다. JobManager에 연결할 수 없거나 timeout이면 서비스 health는 `unknown`, pipeline 목록은 비어 있고 `UPSTREAM_UNAVAILABLE` 경고가 붙으며, HTTP 5xx는 `degraded`, 잘못된/예상 밖 JSON은 `unknown`입니다. 일부 `/jobs/{jobid}` 조회만 실패하면 job은 그대로 반환되고 `PARTIAL` 경고가 붙습니다(sink 테이블 누락). 최대 100개 job만 읽습니다(`TRUNCATED` 경고).
+- `GET /api/v1/services`의 `svc-flink`는 adapter가 제공합니다(version/key metrics는 `/overview`에서, `endpoint`는 노출하지 않음). `GET /api/v1/pipelines`는 **라이브 Flink pipeline만** 반환합니다(Flink job 하나당 Pipeline 하나, id `pl-flink-<jid>`). stub pipeline은 섞지 않습니다.
+- JobManager 부하: 동시에 들어온 `GET /api/v1/pipelines`는 하나의 snapshot 구성을 공유(단일 비행)하며 결과는 `BELUGA_FLINK_CACHE_TTL_MS` 동안 캐시됩니다. 구성 1회는 `/jobs/overview` 1회 + 최대 100개의 `/jobs/{jobid}`(초과 job은 `TRUNCATED` 경고와 함께 제외)이며 snapshot 예산과 전역 동시성 상한으로 제한됩니다. `GET /api/v1/pipelines/{id}`는 신선한 snapshot이 있으면 재사용하고, 없으면 `/jobs/overview` 1회와 해당 job의 `/jobs/{jobid}`만 읽습니다. 실패한 snapshot도 TTL 동안 캐시되므로 복구 반영까지 최대 그만큼 걸릴 수 있습니다. Domain API에는 여전히 인증이 없으므로 이 제한은 인증 없는 호출자가 일으킬 수 있는 부하를 줄일 뿐 없애지는 않습니다.
+- Pipeline id는 `pl-flink-<Flink job id>`(32자리 hex `jid`)입니다. 다른 job에 의존하지 않지만 Flink는 job을 다시 제출하면 새 `jid`를 부여하므로 그때 id가 바뀝니다. `GET /api/v1/pipelines/{id}`는 JobManager에 연결할 수 없으면 404가 아니라 `503 SERVICE_UNAVAILABLE`을 반환하고, 이 형식이 아닌 id는 upstream 호출 없이 404입니다.
+- route 간 참조: stub event, resource, decision은 라이브 pipeline에 없는 stub pipeline id(예: `pl-lakehouse-ingest`)를 가리키므로 어댑터가 켜져 있는 동안 그 `relatedPipelineId`는 `null`로 반환됩니다. 해당 route의 다른 필드는 그대로 stub 데이터이며, 그 링크를 따라가던 클라이언트는 관련 pipeline을 얻지 못합니다.
+- 실패는 route에 오류로 전파되지 않습니다. JobManager에 연결할 수 없거나 timeout이면 서비스 health는 `unknown`, pipeline 목록은 비어 있고 `UPSTREAM_UNAVAILABLE` 경고가 붙으며, HTTP 5xx는 `degraded`, 잘못된/예상 밖 JSON은 `unknown`입니다. 일부 `/jobs/{jobid}` 조회만 실패하면 job은 그대로 반환되고 `PARTIAL` 경고가 붙습니다(sink 테이블 누락). 최대 100개 job만 읽고(`TRUNCATED` 경고), 2 MiB를 넘는 응답 본문은 스트리밍 중에 거부합니다.
 - Flink job 상태에서 도메인 상태로의 매핑(알 수 없는 상태는 `unknown`/`unknown`, failed task가 있는 `RUNNING`은 `degraded`, `failureReason`에는 상태 이름만 담고 exception 텍스트는 담지 않음):
 
 | Flink 상태 | Pipeline/stage status | Job `lastRun.result` |

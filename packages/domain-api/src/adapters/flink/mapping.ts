@@ -87,23 +87,15 @@ export interface FlinkJobInput {
   detail?: FlinkJobDetail;
 }
 
-function pipelineIds(inputs: readonly FlinkJobInput[]): Map<string, string> {
-  const counts = new Map<string, number>();
-  for (const { summary } of inputs) counts.set(slug(summary.name), (counts.get(slug(summary.name)) ?? 0) + 1);
-  const ids = new Map<string, string>();
-  for (const { summary } of inputs) {
-    const base = `pl-flink-${slug(summary.name)}`;
-    // Flink는 같은 이름의 job을 여러 개 허용한다 — 충돌할 때만 jid 접두어로 구분한다.
-    ids.set(summary.jid, (counts.get(slug(summary.name)) ?? 0) > 1 ? `${base}-${summary.jid.slice(0, 8)}` : base);
-  }
-  return ids;
-}
+// D5: Pipeline id는 Flink job id(jid)에서만 파생한다 — 같은 이름의 다른 job이 생기거나 사라져도 바뀌지 않는다.
+// jid는 Flink가 job 실행 인스턴스에 부여하는 값이라 job을 다시 제출(새 jid)하면 id가 바뀐다(문서화된 한계).
+export const PIPELINE_ID_PATTERN = /^pl-flink-([0-9a-f]{32})$/;
+export const pipelineIdFor = (jid: string): string => `pl-flink-${jid}`;
 
 export function buildPipelines(
   inputs: readonly FlinkJobInput[],
   options: { jobNamePrefix: string; now: Date },
 ): { pipelines: Pipeline[]; skipped: number } {
-  const ids = pipelineIds(inputs);
   const pipelines: Pipeline[] = [];
   let skipped = 0;
 
@@ -165,7 +157,7 @@ export function buildPipelines(
     const lastUpdatedAt = isoOrNull(summary["last-modification"]) ?? startedAt ?? options.now.toISOString();
 
     const candidate = {
-      id: ids.get(summary.jid)!,
+      id: pipelineIdFor(summary.jid),
       name: summary.name,
       stages,
       jobs: [job],

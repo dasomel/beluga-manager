@@ -16,7 +16,7 @@ import { services } from "../src/stub-data/services.js";
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(fileURLToPath(new URL(`./fixtures/flink-1.20/${name}`, import.meta.url)), "utf8"));
 
-const config = { baseUrl: "http://flink.test:8081", timeoutMs: 200, jobNamePrefix: "beluga-" };
+const config = { baseUrl: "http://flink.test:8081", timeoutMs: 200, jobNamePrefix: "beluga-", cacheTtlMs: 0, snapshotBudgetMs: 1000, maxConcurrency: 8 };
 const NOW = new Date("2026-10-07T00:00:00.000Z");
 const JIDS = {
   orders: "e4ce0083a91b9378cd054e129326abf7",
@@ -61,10 +61,10 @@ test("녹화된 RUNNING job 3개가 job당 하나의 Pipeline으로 매핑되고
 
   expect(warnings).toEqual([]);
   expect(pipelines.map((p) => p.id)).toEqual([
-    "pl-flink-beluga-cdc-customers",
-    "pl-flink-beluga-cdc-orders",
-    "pl-flink-beluga-events-sessionization",
-  ]);
+    `pl-flink-${JIDS.customers}`,
+    `pl-flink-${JIDS.orders}`,
+    `pl-flink-${JIDS.events}`,
+  ].sort());
   for (const p of pipelines) {
     expect(() => pipelineSchema.parse(p)).not.toThrow();
     expect(p.status).toBe("healthy");
@@ -160,7 +160,7 @@ test("route는 라이브 Pipeline을 목록/상세로 제공하고 없는 id는 
   expect(list.meta.total).toBe(3);
   expect(list.data.every((p) => p.id.startsWith("pl-flink-"))).toBe(true); // stub과 섞이지 않는다.
 
-  const one = await app.request("/api/v1/pipelines/pl-flink-beluga-cdc-orders");
+  const one = await app.request(`/api/v1/pipelines/pl-flink-${JIDS.orders}`);
   expect(one.status).toBe(200);
   expect((await app.request("/api/v1/pipelines/pl-lakehouse-ingest")).status).toBe(404);
 });
@@ -234,6 +234,9 @@ test("설정 검증: 기본값, 경로/자격증명/스킴/타임아웃 오류�
   expect(loadFlinkAdapterConfig({ BELUGA_FLINK_REST_URL: "http://flink-cluster-rest.streaming:8081/" })).toEqual({
     baseUrl: "http://flink-cluster-rest.streaming:8081",
     timeoutMs: DEFAULT_FLINK_TIMEOUT_MS,
+    cacheTtlMs: 5000,
+    snapshotBudgetMs: 5000,
+    maxConcurrency: 8,
     jobNamePrefix: "beluga-",
   });
   const bad = (env: Record<string, string>) => () => loadFlinkAdapterConfig(env);
@@ -243,6 +246,9 @@ test("설정 검증: 기본값, 경로/자격증명/스킴/타임아웃 오류�
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081/jobs" })).toThrow(/bare origin/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_TIMEOUT_MS: "0" })).toThrow(/TIMEOUT/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_TIMEOUT_MS: "abc" })).toThrow(/TIMEOUT/);
+  expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_CACHE_TTL_MS: "-1" })).toThrow(/CACHE_TTL/);
+  expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_SNAPSHOT_BUDGET_MS: "0" })).toThrow(/SNAPSHOT_BUDGET/);
+  expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_MAX_CONCURRENCY: "99" })).toThrow(/MAX_CONCURRENCY/);
 });
 
 test("읽기 전용: GET만, 허용된 경로만 호출하고 변경성 endpoint는 호출하지 않는다", async () => {
@@ -272,11 +278,185 @@ test("job 상세 조회가 실패해도 job은 투영되고 PARTIAL 경고가 �
   expect(customers.stages).toHaveLength(1);
 });
 
-test("같은 이름의 job이 둘이면 jid 접두어로 Pipeline id를 구분한다", async () => {
+test("Pipeline id는 jid에서만 파생되어 같은 이름의 job이 추가/제거되어도 바뀌지 않는다", async () => {
   const base = (fixture("jobs-overview.json") as { jobs: Array<Record<string, unknown>> }).jobs[0]!;
-  const jobs = { jobs: [base, { ...base, jid: "a".repeat(32) }] };
-  const { pipelines } = await adapterWith(recordedFetch({ jobs })).listPipelines();
+  const alone = await adapterWith(recordedFetch({ jobs: { jobs: [base] } })).listPipelines();
+  const twin = { ...base, jid: "a".repeat(32) };
+  const both = await adapterWith(recordedFetch({ jobs: { jobs: [base, twin] } })).listPipelines();
 
-  expect(new Set(pipelines.map((p) => p.id)).size).toBe(2);
-  expect(pipelines.map((p) => p.id).sort()).toEqual(["pl-flink-beluga-cdc-orders-aaaaaaaa", "pl-flink-beluga-cdc-orders-e4ce0083"]);
+  expect(alone.pipelines[0]!.id).toBe(`pl-flink-${JIDS.orders}`);
+  expect(both.pipelines.map((p) => p.id).sort()).toEqual([`pl-flink-${"a".repeat(32)}`, `pl-flink-${JIDS.orders}`].sort());
+  expect(both.pipelines.find((p) => p.id === `pl-flink-${JIDS.orders}`)).toBeDefined();
+});
+
+// ---- 리뷰 반영: 증폭 방어, 단건 조회, 본문 상한, 참조 정합성 ----
+
+function countingFetch(jobCount: number, opts: { delayMs?: number } = {}) {
+  const calls = { overview: 0, jobsOverview: 0, detail: 0, active: 0, maxActive: 0 };
+  const jobs = Array.from({ length: jobCount }, (_, i) => ({
+    ...(fixture("jobs-overview.json") as { jobs: Array<Record<string, unknown>> }).jobs[0]!,
+    jid: i.toString(16).padStart(32, "0"),
+    name: `beluga-job_${i}`,
+  }));
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    calls.active += 1;
+    calls.maxActive = Math.max(calls.maxActive, calls.active);
+    try {
+      if (opts.delayMs) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, opts.delayMs);
+          init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); });
+        });
+      }
+      if (path === "/overview") { calls.overview += 1; return json(fixture("overview.json")); }
+      if (path === "/jobs/overview") { calls.jobsOverview += 1; return json({ jobs }); }
+      calls.detail += 1;
+      return json({ ...(fixture("job-cdc_orders.json") as object), jid: path.replace("/jobs/", "") });
+    } finally {
+      calls.active -= 1;
+    }
+  }) as typeof fetch;
+  return { impl, calls, jobs };
+}
+
+test("동시 inbound 요청 N개는 하나의 snapshot 구성으로 합쳐진다(overview 1 + detail <= MAX_JOBS)", async () => {
+  const { impl, calls } = countingFetch(150, { delayMs: 5 });
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000, snapshotBudgetMs: 5000 });
+  const results = await Promise.all(Array.from({ length: 20 }, () => adapter.listPipelines()));
+
+  expect(calls.jobsOverview).toBe(1);
+  expect(calls.detail).toBeLessThanOrEqual(100);
+  expect(calls.maxActive).toBeLessThanOrEqual(8); // 전역 동시성 상한
+  expect(results.every((r) => r === results[0])).toBe(true);
+  expect(results[0]!.pipelines).toHaveLength(100);
+  expect(results[0]!.warnings.map((w) => w.code)).toContain("TRUNCATED");
+});
+
+test("캐시는 TTL 동안 재사용되고 만료되면 다시 읽는다", async () => {
+  const { impl, calls } = countingFetch(3);
+  let nowMs = Date.parse("2026-10-07T00:00:00Z");
+  const adapter = new FlinkAdapter({ config: { ...config, cacheTtlMs: 5000 }, fetchImpl: impl, now: () => new Date(nowMs) });
+
+  await adapter.listPipelines();
+  nowMs += 4999;
+  await adapter.listPipelines();
+  expect(calls.jobsOverview).toBe(1);
+  nowMs += 2;
+  await adapter.listPipelines();
+  expect(calls.jobsOverview).toBe(2);
+  expect(calls.detail).toBe(6);
+});
+
+test("snapshot 전체 예산을 넘으면 읽은 만큼만 반환하고 PARTIAL 경고를 붙이며 예산 안에 끝난다", async () => {
+  // 개별 timeout(5s)은 길지만 예산(60ms)이 먼저 적용된다. overview는 빠르고 detail은 느리다.
+  const { jobs } = countingFetch(10);
+  const slowDetails = (async (input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/jobs/overview") return json({ jobs });
+    return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+  }) as typeof fetch;
+  const adapter = adapterWith(slowDetails, { timeoutMs: 5000, snapshotBudgetMs: 60, maxConcurrency: 2 });
+
+  const started = Date.now();
+  const { pipelines, warnings } = await adapter.listPipelines();
+  expect(Date.now() - started).toBeLessThan(1000);
+  expect(pipelines).toHaveLength(10);
+  expect(warnings.map((w) => w.code)).toEqual(["PARTIAL"]);
+  expect(warnings[0]!.message).toContain("time budget exceeded");
+});
+
+test("예산 안에 /jobs/overview도 못 받으면 UPSTREAM_UNAVAILABLE이다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const hang = ((_i: unknown, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))))) as typeof fetch;
+  const { warnings } = await adapterWith(hang, { timeoutMs: 5000, snapshotBudgetMs: 30 }).listPipelines();
+  expect(warnings[0]!.code).toBe("UPSTREAM_UNAVAILABLE");
+});
+
+test("전역 동시성 상한은 snapshot과 services 호출을 합쳐서도 지켜진다", async () => {
+  const { impl, calls } = countingFetch(30, { delayMs: 3 });
+  const adapter = adapterWith(impl, { maxConcurrency: 3 });
+  await Promise.all([adapter.listPipelines(), adapter.getHealth(), adapter.getVersion()]);
+  expect(calls.maxActive).toBeLessThanOrEqual(3);
+});
+
+test("GET by id는 전체 목록이 아니라 해당 job의 상세 1건만 읽는다", async () => {
+  const { impl, calls, jobs } = countingFetch(50);
+  const adapter = adapterWith(impl);
+  const target = jobs[7]!["jid"] as string;
+  const lookups = await Promise.all(Array.from({ length: 10 }, () => adapter.getPipeline(`pl-flink-${target}`)));
+
+  expect(calls.jobsOverview).toBe(1); // 동시 호출 합치기
+  expect(calls.detail).toBe(1);
+  expect(lookups[0]!.pipeline?.name).toBe("beluga-job_7");
+  expect((await adapter.getPipeline(`pl-flink-${"f".repeat(32)}`)).pipeline).toBeUndefined();
+  expect((await adapter.getPipeline("pl-lakehouse-ingest")).unavailable).toBe(false);
+});
+
+test("GET by id는 신선한 snapshot 캐시가 있으면 upstream을 호출하지 않는다", async () => {
+  const { impl, calls, jobs } = countingFetch(5);
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
+  await adapter.listPipelines();
+  const before = { ...calls };
+  const found = await adapter.getPipeline(`pl-flink-${jobs[2]!["jid"] as string}`);
+
+  expect(found.pipeline).toBeDefined();
+  expect(calls.jobsOverview).toBe(before.jobsOverview);
+  expect(calls.detail).toBe(before.detail);
+});
+
+test("JobManager가 내려가 있으면 GET by id는 가짜 404가 아니라 503이다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const refused = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+  const app = createApp(undefined, undefined, adapterWith(refused));
+  const res = await app.request(`/api/v1/pipelines/pl-flink-${JIDS.orders}`);
+
+  expect(res.status).toBe(503);
+  const body = (await res.json()) as { error: { code: string; message: string } };
+  expect(body.error.code).toBe("SERVICE_UNAVAILABLE");
+  expect(body.error.message).toContain("unreachable");
+  // 형식이 다른 id는 upstream 상태와 무관하게 404(호출 없음).
+  expect((await app.request("/api/v1/pipelines/pl-lakehouse-ingest")).status).toBe(404);
+});
+
+test("JobManager가 정상이고 job이 없으면 GET by id는 404이다", async () => {
+  const app = createApp(undefined, undefined, adapterWith(recordedFetch({ details: liveDetails })));
+  expect((await app.request(`/api/v1/pipelines/pl-flink-${"f".repeat(32)}`)).status).toBe(404);
+});
+
+test("본문 상한은 스트리밍 중에 적용되어 초과 즉시 읽기를 중단한다", async () => {
+  let pulled = 0;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1;
+      controller.enqueue(new Uint8Array(1024));
+    },
+    cancel() { cancelled = true; },
+  });
+  const huge = (async () => new Response(body, { status: 200 })) as typeof fetch;
+  const client = new FlinkRestClient({ ...config, maxBodyBytes: 4096, fetchImpl: huge });
+
+  await expect(client.getOverview()).rejects.toMatchObject({ kind: "invalid-response" });
+  expect(pulled).toBeLessThan(10); // 무한 스트림을 끝까지 읽지 않는다.
+  expect(cancelled).toBe(true);
+
+  const declared = (async () => new Response("{}", { status: 200, headers: { "content-length": "999999" } })) as typeof fetch;
+  await expect(new FlinkRestClient({ ...config, maxBodyBytes: 4096, fetchImpl: declared }).getOverview()).rejects.toMatchObject({ kind: "invalid-response" });
+});
+
+test("어댑터가 켜지면 다른 route의 stub pipeline 참조는 해석 불가이므로 null이 되고, 꺼져 있으면 그대로이다", async () => {
+  const refs = async (app: ReturnType<typeof createApp>, path: string) =>
+    ((await (await app.request(`${path}?pageSize=100`)).json()) as { data: Array<{ relatedPipelineId: string | null }> }).data.map((d) => d.relatedPipelineId);
+
+  const live = createApp(undefined, undefined, adapterWith(recordedFetch({ details: liveDetails })));
+  for (const path of ["/api/v1/events", "/api/v1/resources", "/api/v1/decisions"]) {
+    const ids = await refs(live, path);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.every((id) => id === null)).toBe(true);
+  }
+  const stub = createApp();
+  const stubIds = [...(await refs(stub, "/api/v1/events")), ...(await refs(stub, "/api/v1/resources")), ...(await refs(stub, "/api/v1/decisions"))];
+  expect(stubIds.some((id) => id === "pl-lakehouse-ingest")).toBe(true);
 });

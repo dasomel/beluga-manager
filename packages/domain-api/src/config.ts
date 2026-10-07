@@ -15,12 +15,23 @@ export interface FlinkAdapterConfig {
   timeoutMs: number;
   /** correlation 이름 규약 비교 전에 job 이름에서 제거하는 접두어. 빈 문자열이면 제거 안 함. */
   jobNamePrefix: string;
+  /** listPipelines snapshot 캐시 TTL(ms). 0이면 캐시 없음(동시 요청 합치기만 유지). */
+  cacheTtlMs: number;
+  /** snapshot 1회 구성의 전체 시간 예산(ms). 초과 시 읽은 만큼만 반환하고 PARTIAL 경고. */
+  snapshotBudgetMs: number;
+  /** upstream 요청 전역 동시성 상한. */
+  maxConcurrency: number;
 }
 
 // D2: 2s는 ServiceAdapterRegistry의 기본 3s deadline보다 짧아, 어댑터가 자체 timeout으로 먼저
 // 분류된 실패를 낸다. 상한 30s는 요청 핸들러가 무기한 매달리지 않게 하는 안전 한계다.
 export const DEFAULT_FLINK_TIMEOUT_MS = 2000;
 const MAX_TIMEOUT_MS = 30_000;
+// D3: 인증 없는 Domain API가 JobManager 부하 증폭기가 되지 않도록 snapshot을 5s 캐시·합치고(단일 비행),
+// 구성 예산 5s, 전역 동시 요청 8로 제한한다. 값은 설정으로 조정할 수 있다.
+export const DEFAULT_FLINK_CACHE_TTL_MS = 5000;
+export const DEFAULT_FLINK_SNAPSHOT_BUDGET_MS = 5000;
+export const DEFAULT_FLINK_MAX_CONCURRENCY = 8;
 export const DEFAULT_FLINK_JOB_NAME_PREFIX = "beluga-";
 
 export function loadFlinkAdapterConfig(env: Record<string, string | undefined>): FlinkAdapterConfig | undefined {
@@ -43,18 +54,27 @@ export function loadFlinkAdapterConfig(env: Record<string, string | undefined>):
     throw new ConfigError("BELUGA_FLINK_REST_URL must be a bare origin (no path, query or fragment)");
   }
 
-  const timeoutRaw = env["BELUGA_FLINK_TIMEOUT_MS"]?.trim();
-  let timeoutMs = DEFAULT_FLINK_TIMEOUT_MS;
-  if (timeoutRaw !== undefined && timeoutRaw !== "") {
-    timeoutMs = Number(timeoutRaw);
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-      throw new ConfigError(`BELUGA_FLINK_TIMEOUT_MS must be an integer between 1 and ${MAX_TIMEOUT_MS}`);
-    }
-  }
+  const timeoutMs = intEnv(env, "BELUGA_FLINK_TIMEOUT_MS", DEFAULT_FLINK_TIMEOUT_MS, 1, MAX_TIMEOUT_MS);
+  const cacheTtlMs = intEnv(env, "BELUGA_FLINK_CACHE_TTL_MS", DEFAULT_FLINK_CACHE_TTL_MS, 0, 60_000);
+  const snapshotBudgetMs = intEnv(env, "BELUGA_FLINK_SNAPSHOT_BUDGET_MS", DEFAULT_FLINK_SNAPSHOT_BUDGET_MS, 1, 60_000);
+  const maxConcurrency = intEnv(env, "BELUGA_FLINK_MAX_CONCURRENCY", DEFAULT_FLINK_MAX_CONCURRENCY, 1, 32);
 
   return {
     baseUrl: url.origin,
     timeoutMs,
+    cacheTtlMs,
+    snapshotBudgetMs,
+    maxConcurrency,
     jobNamePrefix: env["BELUGA_FLINK_JOB_NAME_PREFIX"] ?? DEFAULT_FLINK_JOB_NAME_PREFIX,
   };
+}
+
+function intEnv(env: Record<string, string | undefined>, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new ConfigError(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
 }

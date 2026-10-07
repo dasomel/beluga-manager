@@ -46,6 +46,10 @@ const getByIdRoute = createRoute({
       description: "No pipeline exists with this id.",
       content: { "application/json": { schema: errorResponseSchema } },
     },
+    503: {
+      description: "A live upstream adapter is enabled but unreachable, so existence cannot be determined.",
+      content: { "application/json": { schema: errorResponseSchema } },
+    },
     500: internalErrorResponse,
   },
 });
@@ -74,12 +78,19 @@ export function registerPipelineRoutes(app: OpenAPIHono, adapter?: PipelineAdapt
 
   app.openapi(getByIdRoute, async (c) => {
     const { id } = c.req.valid("param");
-    const found = (await loadSnapshot(adapter)).pipelines.find((pipeline) => pipeline.id === id);
-
+    if (adapter) {
+      const lookup = await adapter.getPipeline(id);
+      if (lookup.unavailable) {
+        const message = lookup.warnings[0]?.message ?? "Upstream pipeline source is unavailable";
+        return c.json({ error: { code: "SERVICE_UNAVAILABLE" as const, message } }, 503);
+      }
+      if (lookup.pipeline) return c.json(lookup.pipeline, 200);
+      return c.json({ error: { code: "NOT_FOUND" as const, message: `Pipeline '${id}' was not found` } }, 404);
+    }
+    const found = pipelines.find((pipeline) => pipeline.id === id);
     if (!found) {
       return c.json({ error: { code: "NOT_FOUND" as const, message: `Pipeline '${id}' was not found` } }, 404);
     }
-
     return c.json(found, 200);
   });
 }

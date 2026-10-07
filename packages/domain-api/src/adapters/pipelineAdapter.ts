@@ -9,6 +9,14 @@ export interface PipelineSnapshot {
   warnings: ListWarning[];
 }
 
+// unavailable: upstream를 읽을 수 없어 "없음"과 "모름"을 구분할 수 없는 상태(404가 아니라 503으로 보고).
+export interface PipelineLookup {
+  pipeline: Pipeline | undefined;
+  warnings: ListWarning[];
+  unavailable: boolean;
+}
+
 export interface PipelineAdapter {
   listPipelines(): Promise<PipelineSnapshot>;
+  getPipeline(id: string): Promise<PipelineLookup>;
 }
