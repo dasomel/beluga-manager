@@ -20,25 +20,40 @@ export interface FlinkAdapterOptions {
 }
 
 // 단일 비행(single-flight) + 짧은 TTL 캐시. 동시에 들어온 호출은 하나의 진행 중 작업을 공유하고,
-// 성공(또는 throw하지 않는 작업의 결과)은 ttlMs 동안 재사용한다.
+// 성공은 ttlMs, 실패는 negativeTtlMs 동안 재사용한다(실패 직후 재시도 폭주 방지).
 class SingleFlightCache<T> {
-  private entry: { value: T; at: number } | undefined;
+  private entry: { at: number; result: { ok: true; value: T } | { ok: false; error: unknown } } | undefined;
   private inflight: Promise<T> | undefined;
 
-  constructor(private readonly ttlMs: number, private readonly clock: () => number) {}
+  constructor(
+    private readonly ttlMs: number,
+    private readonly clock: () => number,
+    private readonly negativeTtlMs = 0,
+  ) {}
 
   peekFresh(): T | undefined {
-    return this.entry && this.clock() - this.entry.at < this.ttlMs ? this.entry.value : undefined;
+    const e = this.entry;
+    return e && e.result.ok && this.clock() - e.at < this.ttlMs ? e.result.value : undefined;
   }
 
   get(load: () => Promise<T>): Promise<T> {
-    const fresh = this.peekFresh();
-    if (fresh !== undefined) return Promise.resolve(fresh);
+    const e = this.entry;
+    if (e) {
+      const age = this.clock() - e.at;
+      if (e.result.ok && age < this.ttlMs) return Promise.resolve(e.result.value);
+      if (!e.result.ok && age < this.negativeTtlMs) return Promise.reject(e.result.error);
+    }
     if (!this.inflight) {
-      const p = load().then((value) => {
-        this.entry = { value, at: this.clock() };
-        return value;
-      });
+      const p = load().then(
+        (value) => {
+          this.entry = { at: this.clock(), result: { ok: true, value } };
+          return value;
+        },
+        (error: unknown) => {
+          this.entry = { at: this.clock(), result: { ok: false, error } };
+          throw error;
+        },
+      );
       this.inflight = p;
       const clear = () => {
         if (this.inflight === p) this.inflight = undefined;
@@ -48,6 +63,30 @@ class SingleFlightCache<T> {
     return this.inflight;
   }
 }
+
+// 키별 SingleFlightCache를 LRU로 제한한다. 키는 외부 입력(jid)에서 오므로 크기가 무한히 자라지 않게 한다.
+class BoundedKeyedCache<T> {
+  private readonly map = new Map<string, SingleFlightCache<T>>();
+
+  constructor(
+    private readonly maxEntries: number,
+    private readonly make: () => SingleFlightCache<T>,
+  ) {}
+
+  get(key: string, load: () => Promise<T>): Promise<T> {
+    let cache = this.map.get(key);
+    if (cache) this.map.delete(key); // 최근 사용 순서로 재삽입
+    else cache = this.make();
+    this.map.set(key, cache);
+    while (this.map.size > this.maxEntries) this.map.delete(this.map.keys().next().value as string);
+    return cache.get(load);
+  }
+}
+
+// D4: by-id 경로의 job 상세 캐시 항목 수 상한(LRU). 요청이 존재하는 job의 jid만 키로 쓰지만 그래도 제한한다.
+const DETAIL_CACHE_MAX_ENTRIES = 256;
+// 실패는 짧게만(최대 1s) 기억한다.
+const NEGATIVE_TTL_CAP_MS = 1000;
 
 export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
   readonly id = FLINK_SERVICE_ID;
@@ -59,8 +98,9 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
   private readonly now: () => Date;
   private readonly overviewCache: SingleFlightCache<FlinkOverview>;
   private readonly snapshotCache: SingleFlightCache<PipelineSnapshot>;
-  // 캐시되지 않는 단일 비행: GET-by-id가 같은 job을 동시에 여러 번 읽지 않게 한다.
-  private readonly jobsInflight = new Map<string, Promise<unknown>>();
+  // GET-by-id 전용: job 목록(요약)과 job별 상세를 단일 비행 + 짧은 TTL로 공유한다.
+  private readonly summariesCache: SingleFlightCache<FlinkJobSummary[]>;
+  private readonly detailCache: BoundedKeyedCache<FlinkJobDetail>;
 
   constructor(private readonly options: FlinkAdapterOptions) {
     const { config } = options;
@@ -68,29 +108,21 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
       baseUrl: config.baseUrl,
       timeoutMs: config.timeoutMs,
       maxConcurrency: config.maxConcurrency,
+      maxQueue: config.maxQueue,
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     });
     this.now = options.now ?? (() => new Date());
     const clock = () => this.now().getTime();
     this.overviewCache = new SingleFlightCache(config.cacheTtlMs, clock);
     this.snapshotCache = new SingleFlightCache(config.cacheTtlMs, clock);
+    const negative = Math.min(config.cacheTtlMs, NEGATIVE_TTL_CAP_MS);
+    this.summariesCache = new SingleFlightCache(config.cacheTtlMs, clock, negative);
+    this.detailCache = new BoundedKeyedCache(DETAIL_CACHE_MAX_ENTRIES, () => new SingleFlightCache(config.cacheTtlMs, clock, negative));
   }
 
   // registry가 metadata/version/health를 병렬로 부르므로 하나의 요청을 공유하고 TTL 동안 재사용한다.
   private overview(): Promise<FlinkOverview> {
     return this.overviewCache.get(() => this.client.getOverview());
-  }
-
-  private shared<T>(key: string, load: () => Promise<T>): Promise<T> {
-    const existing = this.jobsInflight.get(key) as Promise<T> | undefined;
-    if (existing) return existing;
-    const p = load();
-    this.jobsInflight.set(key, p);
-    const clear = () => {
-      if (this.jobsInflight.get(key) === p) this.jobsInflight.delete(key);
-    };
-    p.then(clear, clear);
-    return p;
   }
 
   async getMetadata(): Promise<AdapterMetadata> {
@@ -220,7 +252,7 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
 
     let summaries: FlinkJobSummary[];
     try {
-      summaries = await this.shared("jobs-overview", () => this.client.getJobsOverview());
+      summaries = await this.summariesCache.get(() => this.client.getJobsOverview());
     } catch (err) {
       return { pipeline: undefined, warnings: [warningFor(err)], unavailable: true };
     }
@@ -230,7 +262,7 @@ export class FlinkAdapter implements ServiceAdapter, PipelineAdapter {
     const warnings: ListWarning[] = [];
     let detail: FlinkJobDetail | undefined;
     try {
-      detail = await this.shared(`job:${jid}`, () => this.client.getJob(jid));
+      detail = await this.detailCache.get(jid, () => this.client.getJob(jid));
     } catch {
       warnings.push({
         code: "PARTIAL",
@@ -260,6 +292,7 @@ function warningFor(err: unknown): ListWarning {
     timeout: "Flink JobManager did not respond in time; live pipelines are unavailable",
     "http-error": "Flink JobManager returned an error response; live pipelines are unavailable",
     "invalid-response": "Flink JobManager returned an unexpected response; live pipelines are unavailable",
+    overloaded: "Too many pending Flink JobManager requests; live pipelines are temporarily unavailable",
   };
   console.warn(`Flink adapter: listPipelines failed (${kind})`);
   return { code: "UPSTREAM_UNAVAILABLE", message: messages[kind] ?? messages["unreachable"]!, serviceId: FLINK_SERVICE_ID };

@@ -16,7 +16,7 @@ import { services } from "../src/stub-data/services.js";
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(fileURLToPath(new URL(`./fixtures/flink-1.20/${name}`, import.meta.url)), "utf8"));
 
-const config = { baseUrl: "http://flink.test:8081", timeoutMs: 200, jobNamePrefix: "beluga-", cacheTtlMs: 0, snapshotBudgetMs: 1000, maxConcurrency: 8 };
+const config = { baseUrl: "http://flink.test:8081", timeoutMs: 200, jobNamePrefix: "beluga-", cacheTtlMs: 0, snapshotBudgetMs: 1000, maxConcurrency: 8, maxQueue: 64 };
 const NOW = new Date("2026-10-07T00:00:00.000Z");
 const JIDS = {
   orders: "e4ce0083a91b9378cd054e129326abf7",
@@ -237,6 +237,7 @@ test("설정 검증: 기본값, 경로/자격증명/스킴/타임아웃 오류�
     cacheTtlMs: 5000,
     snapshotBudgetMs: 5000,
     maxConcurrency: 8,
+    maxQueue: 64,
     jobNamePrefix: "beluga-",
   });
   const bad = (env: Record<string, string>) => () => loadFlinkAdapterConfig(env);
@@ -249,6 +250,7 @@ test("설정 검증: 기본값, 경로/자격증명/스킴/타임아웃 오류�
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_CACHE_TTL_MS: "-1" })).toThrow(/CACHE_TTL/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_SNAPSHOT_BUDGET_MS: "0" })).toThrow(/SNAPSHOT_BUDGET/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_MAX_CONCURRENCY: "99" })).toThrow(/MAX_CONCURRENCY/);
+  expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_MAX_QUEUE: "2000" })).toThrow(/MAX_QUEUE/);
 });
 
 test("읽기 전용: GET만, 허용된 경로만 호출하고 변경성 endpoint는 호출하지 않는다", async () => {
@@ -459,4 +461,109 @@ test("어댑터가 켜지면 다른 route의 stub pipeline 참조는 해석 불�
   const stub = createApp();
   const stubIds = [...(await refs(stub, "/api/v1/events")), ...(await refs(stub, "/api/v1/resources")), ...(await refs(stub, "/api/v1/decisions"))];
   expect(stubIds.some((id) => id === "pl-lakehouse-ingest")).toBe(true);
+});
+
+test("서로 다른 유효 jid를 대량으로 by-id 조회해도 upstream 호출은 job 수로 제한된다(요청 수에 비례하지 않음)", async () => {
+  const { impl, calls, jobs } = countingFetch(100, { delayMs: 2 });
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000, maxQueue: 1000 });
+  const ids = jobs.map((j) => `pl-flink-${j["jid"] as string}`);
+  const burst = () => Promise.all(Array.from({ length: 1100 }, (_, i) => adapter.getPipeline(ids[i % ids.length]!)));
+
+  const first = await burst();
+  expect(first.every((r) => r.pipeline !== undefined)).toBe(true);
+  expect(calls.jobsOverview).toBe(1);
+  expect(calls.detail).toBe(100); // job당 1회
+  await burst(); // TTL 안의 반복은 upstream을 호출하지 않는다.
+  expect(calls.jobsOverview).toBe(1);
+  expect(calls.detail).toBe(100);
+});
+
+test("같은 id를 반복 조회하면 TTL당 1회만 읽고 만료되면 다시 읽는다", async () => {
+  const { impl, calls, jobs } = countingFetch(5);
+  let nowMs = Date.parse("2026-10-07T00:00:00Z");
+  const adapter = new FlinkAdapter({ config: { ...config, cacheTtlMs: 5000 }, fetchImpl: impl, now: () => new Date(nowMs) });
+  const id = `pl-flink-${jobs[1]!["jid"] as string}`;
+
+  for (let i = 0; i < 50; i++) await adapter.getPipeline(id);
+  expect(calls.detail).toBe(1);
+  nowMs += 5001;
+  await adapter.getPipeline(id);
+  expect(calls.detail).toBe(2);
+  expect(calls.jobsOverview).toBe(2);
+});
+
+test("실패한 상세 조회는 짧게 negative cache되어 재시도 폭주를 막는다", async () => {
+  let detailCalls = 0;
+  const jobs = (fixture("jobs-overview.json") as { jobs: unknown[] }).jobs;
+  const impl = (async (input: string | URL | Request) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/jobs/overview") return json({ jobs });
+    detailCalls += 1;
+    return new Response("{}", { status: 500 });
+  }) as typeof fetch;
+  const adapter = adapterWith(impl, { cacheTtlMs: 5000 });
+  for (let i = 0; i < 20; i++) {
+    const r = await adapter.getPipeline(`pl-flink-${JIDS.orders}`);
+    expect(r.pipeline).toBeDefined(); // job 자체는 투영되고
+    expect(r.warnings.map((w) => w.code)).toEqual(["PARTIAL"]); // 상세 누락은 경고로 표시된다.
+  }
+  expect(detailCalls).toBe(1);
+});
+
+// ---- client 대기열 ----
+function gate() {
+  let release!: () => void;
+  const opened = new Promise<void>((r) => (release = r));
+  return { opened, release };
+}
+
+test("대기열이 가득 차면 기다리지 않고 즉시 overloaded로 거부한다", async () => {
+  const g = gate();
+  const impl = (async () => { await g.opened; return json(fixture("overview.json")); }) as typeof fetch;
+  const client = new FlinkRestClient({ ...config, timeoutMs: 5000, maxConcurrency: 1, maxQueue: 1, fetchImpl: impl });
+
+  const active = client.getOverview(); // 슬롯 점유
+  const queued = client.getOverview(); // 대기열 1/1
+  const rejected = await client.getOverview().catch((e: unknown) => e);
+  expect(rejected).toMatchObject({ kind: "overloaded" });
+  g.release();
+  await expect(active).resolves.toBeDefined();
+  await expect(queued).resolves.toBeDefined();
+});
+
+test("슬롯 대기 시간도 timeout에 포함되고, 대기 중 만료/abort되어도 슬롯이 새지 않는다", async () => {
+  let hold = true;
+  const impl = ((_i: unknown, init?: RequestInit) =>
+    hold
+      ? new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))))
+      : Promise.resolve(json(fixture("overview.json")))) as typeof fetch;
+  const client = new FlinkRestClient({ ...config, timeoutMs: 40, maxConcurrency: 1, maxQueue: 10, fetchImpl: impl });
+
+  const started = Date.now();
+  const first = client.getOverview().catch((e: unknown) => e); // 슬롯 점유, 40ms에 timeout
+  const waiting = client.getOverview().catch((e: unknown) => e); // 대기 중 같은 40ms 데드라인
+  const ctl = new AbortController();
+  const aborted = client.getOverview(ctl.signal).catch((e: unknown) => e);
+  ctl.abort(); // 대기 중 외부 abort
+  expect(await aborted).toMatchObject({ kind: "timeout" });
+  expect(await first).toMatchObject({ kind: "timeout" });
+  expect(await waiting).toMatchObject({ kind: "timeout" });
+  expect(Date.now() - started).toBeLessThan(500); // 요청당 40ms가 직렬로 쌓이지 않는다.
+
+  hold = false; // 슬롯/대기열 누수가 없으면 새 요청이 바로 성공한다.
+  await expect(client.getOverview()).resolves.toMatchObject({ "flink-version": "1.20.0" });
+  await expect(client.getOverview()).resolves.toBeDefined();
+});
+
+test("대기열이 가득 차면 adapter는 health를 unknown으로 낮춘다", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const g = gate();
+  const impl = (async () => { await g.opened; return json(fixture("jobs-overview.json")); }) as typeof fetch;
+  const adapter = adapterWith(impl, { timeoutMs: 5000, maxConcurrency: 1, maxQueue: 0 });
+  const busy = adapter.getPipeline(`pl-flink-${JIDS.orders}`); // overview가 유일한 슬롯 점유
+  await new Promise((r) => setTimeout(r, 5));
+  const other = await adapter.getHealth(); // 서비스 health도 대기열 없이 거부 -> unknown
+  expect(other.status).toBe("unknown");
+  g.release();
+  await busy;
 });

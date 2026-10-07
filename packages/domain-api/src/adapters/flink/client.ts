@@ -6,7 +6,7 @@
 // 이를 health/warning으로 낮춘다 — route까지 전파되지 않는다.
 import { z } from "@hono/zod-openapi";
 
-export type FlinkErrorKind = "unreachable" | "timeout" | "http-error" | "invalid-response";
+export type FlinkErrorKind = "unreachable" | "timeout" | "http-error" | "invalid-response" | "overloaded";
 
 export class FlinkClientError extends Error {
   constructor(
@@ -23,6 +23,8 @@ export class FlinkClientError extends Error {
 // 쓰지 못하게 한다. content-length 사전 검사 + 스트리밍 중 누적 바이트 검사로 상한을 넘으면 읽기를 중단한다.
 export const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_MAX_CONCURRENCY = 8;
+// 슬롯을 기다리는 요청 대기열 상한: 넘으면 기다리지 않고 즉시 overloaded로 거부한다(메모리/지연 무한 증가 방지).
+export const DEFAULT_MAX_QUEUE = 64;
 
 // Flink는 알 수 없는 상태 문자열이 추가될 수 있으므로 state는 enum이 아니라 string으로 받고
 // 매핑 표에서 보수적으로 처리한다(mapping.ts).
@@ -63,6 +65,7 @@ export interface FlinkClientOptions {
   timeoutMs: number;
   /** 이 클라이언트가 동시에 진행하는 upstream 요청의 전역 상한(요청 단위 timeout은 슬롯을 얻은 뒤 시작). */
   maxConcurrency?: number;
+  maxQueue?: number;
   maxBodyBytes?: number;
   fetchImpl?: typeof fetch;
 }
@@ -71,6 +74,7 @@ export class FlinkRestClient {
   private readonly fetchImpl: typeof fetch;
   private readonly maxConcurrency: number;
   private readonly maxBodyBytes: number;
+  private readonly maxQueue: number;
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 
@@ -78,6 +82,7 @@ export class FlinkRestClient {
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    this.maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE;
   }
 
   getOverview(signal?: AbortSignal): Promise<FlinkOverview> {
@@ -98,10 +103,13 @@ export class FlinkRestClient {
 
   // 전역 동시성 슬롯. 대기 중 abort(예: snapshot 예산 초과)되면 슬롯을 얻지 않고 timeout으로 끝낸다.
   private acquire(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.reject(new FlinkClientError("timeout", "Flink REST request was cancelled"));
+    if (signal.aborted) return Promise.reject(new FlinkClientError("timeout", "Flink REST request timed out or was cancelled while waiting for a slot"));
     if (this.active < this.maxConcurrency) {
       this.active += 1;
       return Promise.resolve();
+    }
+    if (this.waiters.length >= this.maxQueue) {
+      return Promise.reject(new FlinkClientError("overloaded", "Flink REST request queue is full"));
     }
     return new Promise<void>((resolve, reject) => {
       const grant = () => {
@@ -111,7 +119,7 @@ export class FlinkRestClient {
       const onAbort = () => {
         const i = this.waiters.indexOf(grant);
         if (i >= 0) this.waiters.splice(i, 1);
-        reject(new FlinkClientError("timeout", "Flink REST request was cancelled"));
+        reject(new FlinkClientError("timeout", "Flink REST request timed out or was cancelled while waiting for a slot"));
       };
       this.waiters.push(grant);
       signal.addEventListener("abort", onAbort, { once: true });
@@ -131,12 +139,12 @@ export class FlinkRestClient {
       if (external.aborted) controller.abort();
       else external.addEventListener("abort", onExternal, { once: true });
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    // 데드라인은 요청이 들어온 시점(슬롯 대기 포함)부터 시작한다 — 대기열에서도 timeoutMs를 넘기지 못한다.
+    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
     let acquired = false;
     try {
       await this.acquire(controller.signal);
       acquired = true;
-      timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
       let res: Response;
       try {
         res = await this.fetchImpl(`${this.options.baseUrl}${path}`, {

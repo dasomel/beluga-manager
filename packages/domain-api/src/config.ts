@@ -21,6 +21,8 @@ export interface FlinkAdapterConfig {
   snapshotBudgetMs: number;
   /** upstream 요청 전역 동시성 상한. */
   maxConcurrency: number;
+  /** 슬롯 대기열 길이 상한. 가득 차면 즉시 거부(unavailable). */
+  maxQueue: number;
 }
 
 // D2: 2s는 ServiceAdapterRegistry의 기본 3s deadline보다 짧아, 어댑터가 자체 timeout으로 먼저
@@ -32,6 +34,7 @@ const MAX_TIMEOUT_MS = 30_000;
 export const DEFAULT_FLINK_CACHE_TTL_MS = 5000;
 export const DEFAULT_FLINK_SNAPSHOT_BUDGET_MS = 5000;
 export const DEFAULT_FLINK_MAX_CONCURRENCY = 8;
+export const DEFAULT_FLINK_MAX_QUEUE = 64;
 export const DEFAULT_FLINK_JOB_NAME_PREFIX = "beluga-";
 
 export function loadFlinkAdapterConfig(env: Record<string, string | undefined>): FlinkAdapterConfig | undefined {
@@ -57,6 +60,7 @@ export function loadFlinkAdapterConfig(env: Record<string, string | undefined>):
   const timeoutMs = intEnv(env, "BELUGA_FLINK_TIMEOUT_MS", DEFAULT_FLINK_TIMEOUT_MS, 1, MAX_TIMEOUT_MS);
   const cacheTtlMs = intEnv(env, "BELUGA_FLINK_CACHE_TTL_MS", DEFAULT_FLINK_CACHE_TTL_MS, 0, 60_000);
   const snapshotBudgetMs = intEnv(env, "BELUGA_FLINK_SNAPSHOT_BUDGET_MS", DEFAULT_FLINK_SNAPSHOT_BUDGET_MS, 1, 60_000);
+  const maxQueue = intEnv(env, "BELUGA_FLINK_MAX_QUEUE", DEFAULT_FLINK_MAX_QUEUE, 0, 1024);
   const maxConcurrency = intEnv(env, "BELUGA_FLINK_MAX_CONCURRENCY", DEFAULT_FLINK_MAX_CONCURRENCY, 1, 32);
 
   return {
@@ -65,6 +69,7 @@ export function loadFlinkAdapterConfig(env: Record<string, string | undefined>):
     cacheTtlMs,
     snapshotBudgetMs,
     maxConcurrency,
+    maxQueue,
     jobNamePrefix: env["BELUGA_FLINK_JOB_NAME_PREFIX"] ?? DEFAULT_FLINK_JOB_NAME_PREFIX,
   };
 }
