@@ -7,6 +7,8 @@ import { useDataAssets, useQueryContext, useQueryHistory } from '../api/hooks';
 import type { QueryHistoryEntry } from '@beluga-manager/domain-api/schema';
 import { ErrorState, LoadingState } from '../components/QueryState';
 import { SqlEditor } from '../components/SqlEditor';
+import type { EditorTheme } from '../components/sqlEditorTheme';
+export { copyToClipboard } from '../components/clipboard';
 import { DataTable } from '../components/DataTable';
 import { getSafeExternalUrl } from './safeExternalUrl';
 
@@ -18,26 +20,14 @@ import { getSafeExternalUrl } from './safeExternalUrl';
 interface QueryWorkspaceViewProps {
   t: Translations;
   locale?: Locale;
+  theme: EditorTheme;
   initialAssetId?: string;
-}
-
-// Resolves false (never throws) when the Clipboard API is missing (insecure origin) or rejects.
-export async function copyToClipboard(
-  text: string,
-  clipboard: Pick<Clipboard, 'writeText'> | undefined = globalThis.navigator?.clipboard,
-): Promise<boolean> {
-  if (!clipboard) return false;
-  try {
-    await clipboard.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
   t,
   locale = 'en-US',
+  theme,
   initialAssetId,
 }) => {
   const assetsQuery = useDataAssets();
@@ -74,10 +64,8 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         accessorKey: 'sql',
         header: t.query.historyColumns.sql,
         cell: (info) => (
-          <span
-            className="font-mono text-xs text-cyan-800 dark:text-cyan-300 truncate max-w-md block"
-            title={String(info.getValue())}
-          >
+          // No title attribute: it would copy the (unmasked) SQL into tooltips and assistive tech.
+          <span className="font-mono text-xs text-cyan-800 dark:text-cyan-300 truncate max-w-md block">
             {String(info.getValue())}
           </span>
         ),
@@ -165,9 +153,10 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
         <div className="px-4 pb-4">
           <SqlEditor
             value={context.sampleSql}
-            readOnly={true}
             title={t.query.starterSql}
-            ariaLabel={t.query.editorAriaLabel}
+            theme={theme}
+            label={t.query.editorAriaLabel}
+            loadingLabel={t.common.editorLoading}
             readOnlyBadgeLabel={t.query.readOnlyBadge}
             copyLabel={t.query.copySql}
             copiedLabel={t.common.copied}
@@ -231,6 +220,11 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
             </div>
           </div>
         ) : (
+          <>
+          <p role="note" className="rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300 font-medium flex items-start gap-2">
+            <Info className="h-4 w-4 flex-shrink-0 mt-0.5" aria-hidden="true" />
+            <span>{t.query.historyPrivacyNotice}</span>
+          </p>
           <DataTable
             data={historyQuery.data?.data ?? []}
             columns={historyColumns}
@@ -251,6 +245,7 @@ export const QueryWorkspaceView: React.FC<QueryWorkspaceViewProps> = ({
                 : undefined
             }
           />
+          </>
         )}
       </div>
     </div>

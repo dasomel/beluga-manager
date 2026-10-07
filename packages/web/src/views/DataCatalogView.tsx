@@ -7,6 +7,7 @@ import { LoadingState, ErrorState } from '../components/QueryState';
 import { StatusBadge } from '../components/StatusBadge';
 import { DataTable } from '../components/DataTable';
 import { SqlEditor } from '../components/SqlEditor';
+import type { EditorTheme } from '../components/sqlEditorTheme';
 import { formatDateTime } from '../i18n/format';
 import { interpolateCount } from '../i18n/interpolate';
 import { Locale, Translations } from '../i18n/translations';
@@ -138,6 +139,7 @@ export const CatalogTreeNode: React.FC<CatalogTreeNodeProps> = ({
 interface DataCatalogViewProps {
   t: Translations;
   locale?: Locale;
+  theme: EditorTheme;
   onSelectQuery?: (assetId: string) => void;
   initialAssetId?: string;
 }
@@ -145,6 +147,7 @@ interface DataCatalogViewProps {
 export const DataCatalogView: React.FC<DataCatalogViewProps> = ({
   t,
   locale = 'en-US',
+  theme,
   onSelectQuery,
   initialAssetId,
 }) => {
@@ -163,7 +166,6 @@ export const DataCatalogView: React.FC<DataCatalogViewProps> = ({
   const treeMode = catalogAssets.length > 0;
 
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(initialAssetId ?? null);
-  const [copied, setCopied] = useState(false);
 
   // In tree mode a table is only auto-selected when it is visible (orphan); otherwise the detail
   // pane would show a table that is not highlighted in the collapsed tree.
@@ -176,13 +178,6 @@ export const DataCatalogView: React.FC<DataCatalogViewProps> = ({
 
   const catalogTable = selectedTable ? toCatalogTable(selectedTable) : null;
   const sampleSql = catalogTable ? buildCatalogSampleSql(catalogTable) : '';
-
-  const copySql = () => {
-    if (!sampleSql) return;
-    navigator.clipboard.writeText(sampleSql);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   type TableColumn = NonNullable<DataAssetDetail['columns']>[number];
   const schemaColumns = useMemo<ColumnDef<TableColumn, any>[]>(
@@ -392,10 +387,13 @@ export const DataCatalogView: React.FC<DataCatalogViewProps> = ({
                 <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800">
                   <SqlEditor
                     value={sampleSql}
-                    readOnly={true}
+                    theme={theme}
+                    label={t.catalog.editorAriaLabel}
+                    loadingLabel={t.common.editorLoading}
                     title={t.catalog.queryTemplate}
                     copyLabel={t.catalog.copySql}
                     copiedLabel={t.common.copied}
+                    copyFailedLabel={t.catalog.copyFailed}
                     extraActions={
                       onSelectQuery && selectedTable ? (
                         <button

@@ -90,7 +90,7 @@ describe('QueryWorkspaceView', () => {
   });
 
   it('success: shows the Trino target, starter SQL, copy button and Open in Trino link', () => {
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain('beluga_lake.analytics.orders');
     expect(html).toContain('SELECT * FROM &quot;beluga_lake&quot;.&quot;analytics&quot;.&quot;orders&quot; LIMIT 20');
     expect(html).toContain(tEn.query.copySql);
@@ -103,7 +103,7 @@ describe('QueryWorkspaceView', () => {
   });
 
   it('does not pretend to execute queries: no Run button or mock results', () => {
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).not.toContain('Run Query');
     expect(html).not.toContain('<textarea');
     expect(html).not.toContain('Query Succeeded');
@@ -112,13 +112,13 @@ describe('QueryWorkspaceView', () => {
 
   it('requests the handed-off initialAssetId from the catalog', () => {
     mocks.assets = [asset('asset-table-a', 'a.a'), asset('asset-table-b', 'b.b')];
-    renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-table-b" />);
+    renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} initialAssetId="asset-table-b" />);
     expect(mocks.requestedId).toBe('asset-table-b');
   });
 
   it('omits the Open in Trino link when the URL is not a safe http(s) URL', () => {
     mocks.context = { ...ordersContext, trinoUiUrl: 'javascript:alert(1)' };
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).not.toContain(tEn.query.openInTrino);
     expect(html).not.toContain('javascript:');
   });
@@ -126,40 +126,40 @@ describe('QueryWorkspaceView', () => {
   it('loading: shows the loading state while the asset list loads', () => {
     mocks.assetsLoading = true;
     mocks.assets = [];
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain(tEn.common.loading);
   });
 
   it('loading: shows the loading state while the query context loads', () => {
     mocks.contextLoading = true;
     mocks.context = undefined;
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain(tEn.common.loading);
   });
 
   it('error: shows the load error when the asset list fails', () => {
     mocks.assetsError = true;
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain(tEn.common.loadError);
     expect(html).toContain('assets down');
   });
 
   it('error: shows the load error when the query context fails', () => {
     mocks.contextError = true;
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain(tEn.common.loadError);
     expect(html).toContain('context 404');
   });
 
   it('empty: shows the empty state when there are no table assets', () => {
     mocks.assets = [asset('asset-topic-x', 'orders.events', 'topic')];
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
     expect(html).toContain(tEn.query.emptyState);
     expect(html).not.toContain(tEn.query.assetLabel);
   });
 
   it('renders Korean translations', () => {
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tKo} locale="ko-KR" />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tKo} locale="ko-KR" />);
     expect(html).toContain(tKo.query.title);
     expect(html).toContain(tKo.query.openInTrino);
     expect(html).toContain(tKo.query.copySql);
@@ -170,13 +170,13 @@ describe('QueryWorkspaceView', () => {
   it('shows the context of the asset named by initialAssetId (distinct data per id)', () => {
     mocks.assets = [asset('asset-table-orders', 'analytics.orders'), asset('asset-table-users', 'analytics.users')];
     mocks.contexts = { 'asset-table-users': { ...ordersContext, assetId: 'asset-table-users', table: 'users' } };
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-table-users" />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} initialAssetId="asset-table-users" />);
     expect(html).toContain('beluga_lake.analytics.users');
     expect(html).toContain('<option value="asset-table-users" selected');
   });
 
   it('falls back to the first table when initialAssetId is not a listed table asset', () => {
-    renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-topic-x" />);
+    renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} initialAssetId="asset-topic-x" />);
     expect(mocks.requestedId).toBe('asset-table-orders');
   });
 
@@ -186,7 +186,7 @@ describe('QueryWorkspaceView', () => {
       { id: 'query-102', sql: 'SELECT count(*) FROM analytics.users', state: 'FAILED' },
     ];
     mocks.historyTotal = 2;
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
 
     expect(html).toContain(tEn.query.historyTitle);
     expect(html).toContain(tEn.query.historyColumns.id);
@@ -202,17 +202,33 @@ describe('QueryWorkspaceView', () => {
   it('renders graceful notice when query history adapter returns 503 (no adapter wired)', () => {
     mocks.historyError = true;
     mocks.historyErrorObj = Object.assign(new Error('503 Service Unavailable'), { status: 503 });
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
 
     expect(html).toContain(tEn.query.historyTitle);
     expect(html).toContain(tEn.query.historyUnavailable);
     expect(html).not.toContain(tEn.common.loadError);
   });
 
+  it('passes the app theme to the SQL editor', () => {
+    expect(renderToStaticMarkup(<QueryWorkspaceView theme="dark" t={tEn} />)).toContain('data-theme="dark"');
+    expect(renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />)).toContain('data-theme="light"');
+  });
+
+  it('warns that history may show other users\' queries and literals, in en-US and ko-KR', () => {
+    mocks.historyEntries = [{ id: 'q1', sql: "SELECT 'secret-literal'", state: 'FINISHED' } as QueryHistoryEntry];
+    mocks.historyTotal = 1;
+    const en = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
+    expect(en).toContain(tEn.query.historyPrivacyNotice);
+    expect(en).toContain('secret-literal'); // shown (masking is not guaranteed by the UI) ...
+    expect(en).not.toMatch(/title="[^"]*secret-literal/); // ... but never copied into a title/tooltip
+    const ko = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tKo} locale="ko-KR" />);
+    expect(ko).toContain(tKo.query.historyPrivacyNotice);
+  });
+
   it('renders empty notice when query history is empty', () => {
     mocks.historyEntries = [];
     mocks.historyTotal = 0;
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} />);
 
     expect(html).toContain(tEn.query.historyTitle);
     expect(html).toContain(tEn.query.historyEmpty);

@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ColumnDef,
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
+  SortingFn,
   SortingState,
   useReactTable,
   VisibilityState,
@@ -12,6 +13,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Columns3 } 
 import { Translations, Locale } from '../i18n/translations';
 import { interpolate } from '../i18n/interpolate';
 import { LoadingState, ErrorState } from './QueryState';
+import { createCollator, disclosureAction, tanstackSortResult } from './dataTableSort';
 
 export interface DataTablePaginationProps {
   page: number;
@@ -28,7 +30,9 @@ export interface DataTableProps<TData> {
   isLoading?: boolean;
   error?: unknown;
   emptyMessage?: string;
-  ariaLabel?: string;
+  /** Accessible name of the scrollable table region -- required. */
+  ariaLabel: string;
+  initialSorting?: SortingState;
   className?: string;
   maxHeight?: string;
   stickyHeader?: boolean;
@@ -37,10 +41,13 @@ export interface DataTableProps<TData> {
   extraToolbar?: React.ReactNode;
 }
 
-// D1: TanStack Table (MIT, ADR-0003) headless grid component. Provides accessible sorting
-// (aria-sort, keyboard navigation), column visibility toggling, sticky header, and row count.
-// Built without virtualization since schema columns (<50) and paginated query history (<50)
-// do not justify virtual DOM overhead.
+// D1: TanStack Table (MIT, ADR-0003) headless grid component: sorting (aria-sort on the th, a
+// button per column whose name includes the column), column visibility (disclosure + checkboxes),
+// sticky header, row count. No virtualization: schema columns (<50) and paginated history (<50)
+// do not justify it. D2: column visibility is NOT persisted (resets on remount); there is no
+// stable per-table key yet, so persisting is deferred rather than guessed.
+// Sorting: numbers numerically, strings by Intl.Collator(locale, numeric), empties (null/undefined/NaN)
+// always last in both directions, stable (see dataTableSort.ts).
 export function DataTable<TData>({
   data,
   columns,
@@ -50,6 +57,7 @@ export function DataTable<TData>({
   error = null,
   emptyMessage,
   ariaLabel,
+  initialSorting = [],
   className = '',
   maxHeight = '500px',
   stickyHeader = true,
@@ -57,13 +65,60 @@ export function DataTable<TData>({
   pagination,
   extraToolbar,
 }: DataTableProps<TData>): React.ReactElement {
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [isVisibilityMenuOpen, setIsVisibilityMenuOpen] = useState(false);
+  const panelId = useId();
+  const disclosureRef = useRef<HTMLDivElement>(null);
+  const disclosureButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Esc closes and returns focus to the button; a pointer press or focus moving outside closes.
+  useEffect(() => {
+    if (!isVisibilityMenuOpen) return;
+    const inside = (n: EventTarget | null) => n instanceof Node && !!disclosureRef.current?.contains(n);
+    const onKey = (e: KeyboardEvent) => {
+      if (disclosureAction({ type: 'key', key: e.key }) === 'close-and-refocus') {
+        setIsVisibilityMenuOpen(false);
+        disclosureButtonRef.current?.focus();
+      }
+    };
+    const onPointer = (e: PointerEvent) => {
+      if (disclosureAction({ type: 'pointer', insidePanelOrButton: inside(e.target) }) === 'close') {
+        setIsVisibilityMenuOpen(false);
+      }
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      if (e.relatedTarget && disclosureAction({ type: 'focusout', nextFocusInside: inside(e.relatedTarget) }) === 'close') {
+        setIsVisibilityMenuOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPointer);
+    const root = disclosureRef.current;
+    root?.addEventListener('focusout', onFocusOut);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPointer);
+      root?.removeEventListener('focusout', onFocusOut);
+    };
+  }, [isVisibilityMenuOpen]);
+
+  const collator = useMemo(() => createCollator(locale), [locale]);
+  const sortingFn = useMemo<SortingFn<TData>>(
+    () => (rowA, rowB, columnId) =>
+      tanstackSortResult(
+        rowA.getValue(columnId),
+        rowB.getValue(columnId),
+        sorting.find((s) => s.id === columnId)?.desc ?? false,
+        collator,
+      ),
+    [sorting, collator],
+  );
 
   const table = useReactTable({
     data,
     columns,
+    defaultColumn: { sortingFn },
     state: {
       sorting,
       columnVisibility,
@@ -84,8 +139,6 @@ export function DataTable<TData>({
 
   return (
     <div
-      role="region"
-      aria-label={ariaLabel}
       className={`rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-xs ${className}`}
     >
       {/* Table Toolbar */}
@@ -97,13 +150,13 @@ export function DataTable<TData>({
 
         <div className="flex items-center gap-2">
           {enableColumnVisibility && hideableColumns.length > 0 && (
-            <div className="relative">
+            <div className="relative" ref={disclosureRef}>
               <button
                 type="button"
+                ref={disclosureButtonRef}
                 onClick={() => setIsVisibilityMenuOpen(!isVisibilityMenuOpen)}
                 aria-expanded={isVisibilityMenuOpen}
-                aria-haspopup="menu"
-                aria-label={t.table.columnsVisibility}
+                aria-controls={panelId}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-bold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors focus:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-500"
               >
                 <Columns3 className="h-3.5 w-3.5 text-cyan-700 dark:text-cyan-400" aria-hidden="true" />
@@ -112,7 +165,9 @@ export function DataTable<TData>({
 
               {isVisibilityMenuOpen && (
                 <div
-                  role="menu"
+                  id={panelId}
+                  role="group"
+                  aria-label={t.table.columnsVisibility}
                   className="absolute right-0 mt-1 z-20 w-56 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg p-2 text-xs"
                 >
                   <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-slate-100 dark:border-slate-800">
@@ -194,12 +249,21 @@ export function DataTable<TData>({
                         : isSorted === 'desc'
                           ? 'descending'
                           : 'none';
-                    const sortActionLabel =
-                      isSorted === 'asc'
-                        ? t.table.sortDescending
-                        : isSorted === 'desc'
-                          ? t.table.clearSort
-                          : t.table.sortAscending;
+                    const headerDef = header.column.columnDef.header;
+                    const columnLabel = typeof headerDef === 'string' ? headerDef : header.column.id;
+                    const sortActionLabel = interpolate(
+                      t.table.sortBy,
+                      {
+                        column: columnLabel,
+                        state:
+                          isSorted === 'asc'
+                            ? t.table.sortStateAscending
+                            : isSorted === 'desc'
+                              ? t.table.sortStateDescending
+                              : t.table.sortStateNone,
+                      },
+                      locale,
+                    );
 
                     return (
                       <th
@@ -248,7 +312,7 @@ export function DataTable<TData>({
                 table.getRowModel().rows.map((row) => (
                   <tr
                     key={row.id}
-                    className="hover:bg-slate-50/70 dark:hover:bg-slate-850/60 transition-colors"
+                    className="hover:bg-slate-50/70 dark:hover:bg-slate-800/60 transition-colors"
                   >
                     {row.getVisibleCells().map((cell) => (
                       <td key={cell.id} className="py-2.5 px-3">

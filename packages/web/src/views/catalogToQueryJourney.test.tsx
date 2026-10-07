@@ -112,7 +112,7 @@ describe('Critical journey: Catalog -> Table -> Query', () => {
 
   it('step 1: DataCatalogView renders the selected table with an Open-in-Query affordance', () => {
     const html = renderToStaticMarkup(
-      <DataCatalogView t={tEn} locale="en-US" onSelectQuery={vi.fn()} initialAssetId="asset-table-orders" />,
+      <DataCatalogView theme="light" t={tEn} locale="en-US" onSelectQuery={vi.fn()} initialAssetId="asset-table-orders" />,
     );
     expect(html).toContain('analytics.orders');
     expect(html).toContain(tEn.catalog.openInQuery);
@@ -120,7 +120,7 @@ describe('Critical journey: Catalog -> Table -> Query', () => {
 
   it('does not render the Open-in-Query affordance when the caller has not wired a handler', () => {
     const html = renderToStaticMarkup(
-      <DataCatalogView t={tEn} locale="en-US" initialAssetId="asset-table-orders" />,
+      <DataCatalogView theme="light" t={tEn} locale="en-US" initialAssetId="asset-table-orders" />,
     );
     expect(html).not.toContain(tEn.catalog.openInQuery);
   });
@@ -143,7 +143,7 @@ describe('Critical journey: Catalog -> Table -> Query', () => {
     const props = mapCatalogQueryTargetToWorkspaceProps(assetId);
     expect(props).toEqual({ initialAssetId: 'asset-table-orders' });
 
-    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} locale="en-US" {...props} />);
+    const html = renderToStaticMarkup(<QueryWorkspaceView theme="light" t={tEn} locale="en-US" {...props} />);
 
     expect(mocks.requestedQueryContextId).toBe('asset-table-orders');
     expect(html).toContain('beluga_lake.analytics.orders');
