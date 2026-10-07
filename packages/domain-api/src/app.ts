@@ -1,6 +1,7 @@
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
+import type { PipelineAdapter } from "./adapters/pipelineAdapter.js";
 import type { QueryHistoryAdapter } from "./adapters/queryHistory.js";
 import type { ServiceAdapterRegistry } from "./adapters/registry.js";
 import { createStubRegistry } from "./adapters/stubAdapter.js";
@@ -18,7 +19,7 @@ import { registerQueryHistoryRoutes } from "./routes/queryHistory.js";
 const OPENAPI_JSON_PATH = "/api/v1/openapi.json";
 const DOCS_PATH = "/api/v1/docs";
 
-export function createApp(registry: ServiceAdapterRegistry = createStubRegistry(), queryHistoryAdapter?: QueryHistoryAdapter): OpenAPIHono {
+export function createApp(registry: ServiceAdapterRegistry = createStubRegistry(), queryHistoryAdapter?: QueryHistoryAdapter, pipelineAdapter?: PipelineAdapter): OpenAPIHono {
   // ADR-0002 Decision Drivers의 "consistent error" 원칙을 요청 파라미터 검증 실패에도
   // 적용한다 — 브리프가 명시한 건 단일 리소스 404뿐이지만, zod-openapi 기본 검증 실패
   // 응답({success, error:{name,message}})을 그대로 두면 같은 API 안에 에러 모양이
@@ -52,7 +53,7 @@ export function createApp(registry: ServiceAdapterRegistry = createStubRegistry(
 
   registerHealthRoutes(app);
   registerServiceRoutes(app, registry);
-  registerPipelineRoutes(app);
+  registerPipelineRoutes(app, pipelineAdapter);
   registerDataAssetRoutes(app);
   registerQueryContextRoutes(app, undefined, registry);
   registerQueryHistoryRoutes(app, queryHistoryAdapter);

@@ -47,6 +47,34 @@ Domain API는 엔드포인트를 `/api/v1` 아래 9개의 리소스 그룹으로
 - **Decisions (`/api/v1/decisions`)**: [`packages/domain-api/src/routes/decisions.ts`](../packages/domain-api/src/routes/decisions.ts)에 정의됨. `decision` 판단 결과 필터링을 지원합니다.
 - **Policies (`/api/v1/policies`)**: [`packages/domain-api/src/routes/policies.ts`](../packages/domain-api/src/routes/policies.ts)에 정의됨. `role` 필터링을 지원합니다.
 
+## Upstream Adapter: Flink (opt-in, 읽기 전용)
+
+기본값에서 Domain API는 stub fixture를 제공하며 upstream 호출을 하지 않습니다. `BELUGA_FLINK_REST_URL`을 설정하면 Flink adapter([`packages/domain-api/src/adapters/flink/`](../packages/domain-api/src/adapters/flink/), 이슈 #16/#35/#41)가 활성화되며, 잘못된 값은 기동 시점에 실패합니다.
+
+| 변수 | 기본값 | 의미 |
+|---|---|---|
+| `BELUGA_FLINK_REST_URL` | 미설정(adapter 비활성) | Flink JobManager REST origin (예: `http://flink-cluster-rest.streaming:8081`). `http`/`https`여야 하며 경로와 내장 자격증명은 허용되지 않습니다. |
+| `BELUGA_FLINK_TIMEOUT_MS` | `2000` | 요청별 timeout, 1~30000 사이 정수. |
+| `BELUGA_FLINK_JOB_NAME_PREFIX` | `beluga-` | 이름 규약 correlation 전에 Flink job 이름에서 제거하는 접두어(`beluga-cdc_orders`는 `cdc_orders`로 비교). |
+
+활성화 시 동작:
+
+- `GET /overview`, `GET /jobs/overview`, `GET /jobs/{jobid}`만 호출합니다([Flink 1.20 REST API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/rest_api/)). 클라이언트에는 변경성 요청이 존재하지 않습니다.
+- `GET /api/v1/services`의 `svc-flink`는 adapter가 제공합니다(version/key metrics는 `/overview`에서, `endpoint`는 노출하지 않음). `GET /api/v1/pipelines`는 **라이브 Flink pipeline만** 반환합니다(Flink job 하나당 Pipeline 하나, id `pl-flink-<job 이름 slug>`). stub pipeline은 섞지 않습니다.
+- 실패는 route에 오류로 전파되지 않습니다. JobManager에 연결할 수 없거나 timeout이면 서비스 health는 `unknown`, pipeline 목록은 비어 있고 `UPSTREAM_UNAVAILABLE` 경고가 붙으며, HTTP 5xx는 `degraded`, 잘못된/예상 밖 JSON은 `unknown`입니다. 일부 `/jobs/{jobid}` 조회만 실패하면 job은 그대로 반환되고 `PARTIAL` 경고가 붙습니다(sink 테이블 누락). 최대 100개 job만 읽습니다(`TRUNCATED` 경고).
+- Flink job 상태에서 도메인 상태로의 매핑(알 수 없는 상태는 `unknown`/`unknown`, failed task가 있는 `RUNNING`은 `degraded`, `failureReason`에는 상태 이름만 담고 exception 텍스트는 담지 않음):
+
+| Flink 상태 | Pipeline/stage status | Job `lastRun.result` |
+|---|---|---|
+| `RUNNING` | `healthy` | `running` |
+| `FINISHED` | `healthy` | `succeeded` |
+| `RESTARTING`, `FAILING` | `degraded` | `unknown` |
+| `FAILED` | `unavailable` | `failed` |
+| `CANCELED`, `SUSPENDED` | `unavailable` | `unknown` |
+| `INITIALIZING`, `CREATED`, `RECONCILING`, `CANCELLING`, 그 외 | `unknown` | `unknown` |
+
+- Correlation: Flink REST는 Kafka topic도 label도 노출하지 않으므로 `topic-feeds-job` 링크는 만들지 않습니다. job graph의 `IcebergSink` 정점이 보고하는 sink 테이블을 `iceberg-table` 엔티티로 추가하고 기존 name-convention 규칙으로 연결합니다(`method` `name-convention`, confidence 0.6, Flink job-graph 정점이 `evidence`에 추가됨). Iceberg stage는 Lakekeeper/Trino로 검증하지 않았으므로 `unknown`으로 유지합니다. 모든 라이브 Pipeline의 `correlation.method`는 `inferred`입니다.
+
 ## 공통 규약
 
 ### 페이지네이션

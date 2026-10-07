@@ -47,6 +47,34 @@ The Domain API organizes endpoints into nine distinct resource groups under `/ap
 - **Decisions (`/api/v1/decisions`)**: Defined in [`packages/domain-api/src/routes/decisions.ts`](../packages/domain-api/src/routes/decisions.ts). Supports filtering by `decision` outcome.
 - **Policies (`/api/v1/policies`)**: Defined in [`packages/domain-api/src/routes/policies.ts`](../packages/domain-api/src/routes/policies.ts). Supports filtering by `role`.
 
+## Upstream Adapters: Flink (opt-in, read-only)
+
+By default the Domain API serves stub fixtures and makes no upstream calls. Setting `BELUGA_FLINK_REST_URL` enables the Flink adapter ([`packages/domain-api/src/adapters/flink/`](../packages/domain-api/src/adapters/flink/), issues #16/#35/#41); invalid values fail at startup.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BELUGA_FLINK_REST_URL` | unset (adapter disabled) | Flink JobManager REST origin, e.g. `http://flink-cluster-rest.streaming:8081`. Must be `http`/`https`, no path, no embedded credentials. |
+| `BELUGA_FLINK_TIMEOUT_MS` | `2000` | Per-request timeout, integer 1-30000. |
+| `BELUGA_FLINK_JOB_NAME_PREFIX` | `beluga-` | Removed from a Flink job name before name-convention correlation (`beluga-cdc_orders` is compared as `cdc_orders`). |
+
+Behavior when enabled:
+
+- Only `GET /overview`, `GET /jobs/overview` and `GET /jobs/{jobid}` are called ([Flink 1.20 REST API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/rest_api/)); no mutating request exists in the client.
+- `svc-flink` in `GET /api/v1/services` is served by the adapter (version and key metrics from `/overview`; `endpoint` is not exposed). `GET /api/v1/pipelines` returns **live Flink pipelines only** (one Pipeline per Flink job, id `pl-flink-<job-name-slug>`); stub pipelines are not mixed in.
+- Failures never reach the route as errors: an unreachable or timed-out JobManager gives `unknown` service health and an empty pipeline list with an `UPSTREAM_UNAVAILABLE` warning; HTTP 5xx gives `degraded`; malformed or unexpected JSON gives `unknown`. If only some `/jobs/{jobid}` lookups fail, the jobs are still returned with a `PARTIAL` warning (their sink tables are missing); at most 100 jobs are read (`TRUNCATED` warning).
+- Flink job state to domain status (unrecognised states map to `unknown`/`unknown`; `RUNNING` with a failed task is `degraded`; `failureReason` carries only the state name, never exception text):
+
+| Flink state | Pipeline/stage status | Job `lastRun.result` |
+|---|---|---|
+| `RUNNING` | `healthy` | `running` |
+| `FINISHED` | `healthy` | `succeeded` |
+| `RESTARTING`, `FAILING` | `degraded` | `unknown` |
+| `FAILED` | `unavailable` | `failed` |
+| `CANCELED`, `SUSPENDED` | `unavailable` | `unknown` |
+| `INITIALIZING`, `CREATED`, `RECONCILING`, `CANCELLING`, any other | `unknown` | `unknown` |
+
+- Correlation: Flink REST exposes neither Kafka topics nor labels, so no `topic-feeds-job` link is produced. The sink table named by an `IcebergSink` vertex of the job graph is added as an `iceberg-table` entity and linked through the existing name-convention rule (`method` `name-convention`, confidence 0.6; the Flink job-graph vertex is appended to `evidence`). The Iceberg stage stays `unknown` because it is not verified against Lakekeeper/Trino. Each live Pipeline has `correlation.method` `inferred`.
+
 ## Common Conventions
 
 ### Pagination
