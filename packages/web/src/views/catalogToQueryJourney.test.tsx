@@ -63,6 +63,11 @@ vi.mock('../api/hooks', () => ({
       isError: false,
     };
   },
+  useQueryHistory: () => ({
+    data: { data: [], meta: { total: 0, page: 1, pageSize: 20 }, warnings: [] },
+    isLoading: false,
+    isError: false,
+  }),
 }));
 
 const tEn = getTranslations('en-US');

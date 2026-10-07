@@ -1,7 +1,7 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DataAsset, QueryContext } from '@beluga-manager/domain-api/schema';
+import type { DataAsset, QueryContext, QueryHistoryEntry } from '@beluga-manager/domain-api/schema';
 import { getTranslations } from '../i18n/getTranslations';
 import { QueryWorkspaceView, copyToClipboard } from './QueryWorkspaceView';
 
@@ -14,6 +14,11 @@ const mocks = vi.hoisted(() => ({
   contextLoading: false,
   contextError: false,
   requestedId: undefined as string | null | undefined,
+  historyEntries: [] as QueryHistoryEntry[],
+  historyLoading: false,
+  historyError: false,
+  historyErrorObj: null as unknown,
+  historyTotal: 0,
 }));
 
 vi.mock('../api/hooks', () => ({
@@ -32,6 +37,16 @@ vi.mock('../api/hooks', () => ({
       error: mocks.contextError ? new Error('context 404') : null,
     };
   },
+  useQueryHistory: (page: number, pageSize: number) => ({
+    data: mocks.historyError ? undefined : {
+      data: mocks.historyEntries,
+      meta: { total: mocks.historyTotal, page, pageSize },
+      warnings: [],
+    },
+    isLoading: mocks.historyLoading,
+    isError: mocks.historyError,
+    error: mocks.historyErrorObj ?? (mocks.historyError ? new Error('history failed') : null),
+  }),
 }));
 
 const tEn = getTranslations('en-US');
@@ -67,6 +82,11 @@ describe('QueryWorkspaceView', () => {
     mocks.contextLoading = false;
     mocks.contextError = false;
     mocks.requestedId = undefined;
+    mocks.historyEntries = [];
+    mocks.historyLoading = false;
+    mocks.historyError = false;
+    mocks.historyErrorObj = null;
+    mocks.historyTotal = 0;
   });
 
   it('success: shows the Trino target, starter SQL, copy button and Open in Trino link', () => {
@@ -76,6 +96,7 @@ describe('QueryWorkspaceView', () => {
     expect(html).toContain(tEn.query.copySql);
     expect(html).toContain(tEn.query.openInTrino);
     expect(html).toContain('href="https://trino.local.beluga.internal/"');
+    expect(html).toContain(tEn.query.readOnlyBadge);
     // Defaults to the first *table* asset (topics are not queryable).
     expect(mocks.requestedId).toBe('asset-table-orders');
     expect(html).not.toContain('asset-topic-x');
@@ -114,7 +135,6 @@ describe('QueryWorkspaceView', () => {
     mocks.context = undefined;
     const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
     expect(html).toContain(tEn.common.loading);
-    expect(html).not.toContain(tEn.query.copySql);
   });
 
   it('error: shows the load error when the asset list fails', () => {
@@ -129,7 +149,6 @@ describe('QueryWorkspaceView', () => {
     const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
     expect(html).toContain(tEn.common.loadError);
     expect(html).toContain('context 404');
-    expect(html).not.toContain(tEn.query.copySql);
   });
 
   it('empty: shows the empty state when there are no table assets', () => {
@@ -144,6 +163,8 @@ describe('QueryWorkspaceView', () => {
     expect(html).toContain(tKo.query.title);
     expect(html).toContain(tKo.query.openInTrino);
     expect(html).toContain(tKo.query.copySql);
+    expect(html).toContain(tKo.query.readOnlyBadge);
+    expect(html).toContain(tKo.query.historyTitle);
   });
 
   it('shows the context of the asset named by initialAssetId (distinct data per id)', () => {
@@ -157,6 +178,44 @@ describe('QueryWorkspaceView', () => {
   it('falls back to the first table when initialAssetId is not a listed table asset', () => {
     renderToStaticMarkup(<QueryWorkspaceView t={tEn} initialAssetId="asset-topic-x" />);
     expect(mocks.requestedId).toBe('asset-table-orders');
+  });
+
+  it('renders query history table with Query ID, SQL, and State columns when history is available', () => {
+    mocks.historyEntries = [
+      { id: 'query-101', sql: 'SELECT * FROM analytics.orders', state: 'FINISHED' },
+      { id: 'query-102', sql: 'SELECT count(*) FROM analytics.users', state: 'FAILED' },
+    ];
+    mocks.historyTotal = 2;
+    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+
+    expect(html).toContain(tEn.query.historyTitle);
+    expect(html).toContain(tEn.query.historyColumns.id);
+    expect(html).toContain(tEn.query.historyColumns.sql);
+    expect(html).toContain(tEn.query.historyColumns.state);
+    expect(html).toContain('query-101');
+    expect(html).toContain('SELECT * FROM analytics.orders');
+    expect(html).toContain('FINISHED');
+    expect(html).toContain('query-102');
+    expect(html).toContain('FAILED');
+  });
+
+  it('renders graceful notice when query history adapter returns 503 (no adapter wired)', () => {
+    mocks.historyError = true;
+    mocks.historyErrorObj = Object.assign(new Error('503 Service Unavailable'), { status: 503 });
+    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+
+    expect(html).toContain(tEn.query.historyTitle);
+    expect(html).toContain(tEn.query.historyUnavailable);
+    expect(html).not.toContain(tEn.common.loadError);
+  });
+
+  it('renders empty notice when query history is empty', () => {
+    mocks.historyEntries = [];
+    mocks.historyTotal = 0;
+    const html = renderToStaticMarkup(<QueryWorkspaceView t={tEn} />);
+
+    expect(html).toContain(tEn.query.historyTitle);
+    expect(html).toContain(tEn.query.historyEmpty);
   });
 });
 

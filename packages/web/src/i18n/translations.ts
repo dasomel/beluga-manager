@@ -210,6 +210,32 @@ export interface Translations {
     openInTrino: string;
     emptyState: string;
     noTableSelected: string;
+    historyTitle: string;
+    historySubtitle: string;
+    historyUnavailable: string;
+    historyEmpty: string;
+    historyColumns: {
+      id: string;
+      sql: string;
+      state: string;
+    };
+    readOnlyBadge: string;
+    editorAriaLabel: string;
+  };
+  table: {
+    sortAscending: string;
+    sortDescending: string;
+    clearSort: string;
+    columnsVisibility: string;
+    showAllColumns: string;
+    resetColumns: string;
+    rowsCount: string;
+    emptyRows: string;
+    filterColumns: string;
+    toggleColumn: string;
+    page: string;
+    previousPage: string;
+    nextPage: string;
   };
   policy: {
     title: string;
@@ -527,6 +553,32 @@ export const translations: Record<Locale, Translations> = {
       openInTrino: 'Trino에서 열기',
       emptyState: '쿼리할 수 있는 테이블 자산이 없습니다.',
       noTableSelected: '테이블 자산을 선택하세요.',
+      historyTitle: '쿼리 이력',
+      historySubtitle: '원천 Trino 어댑터가 보고한 최근 쿼리 스냅샷 (읽기 전용, 503 미연결 시 표시)',
+      historyUnavailable: '쿼리 이력 어댑터가 연결되지 않았거나 일시적으로 사용할 수 없습니다 (503).',
+      historyEmpty: '보고된 쿼리 이력이 없습니다.',
+      historyColumns: {
+        id: '쿼리 ID',
+        sql: '실행 SQL',
+        state: '상태',
+      },
+      readOnlyBadge: '읽기 전용 시작 SQL',
+      editorAriaLabel: 'Trino 시작 SQL 에디터',
+    },
+    table: {
+      sortAscending: '오름차순 정렬',
+      sortDescending: '내림차순 정렬',
+      clearSort: '정렬 초기화',
+      columnsVisibility: '컬럼 표시 설정',
+      showAllColumns: '모든 컬럼 표시',
+      resetColumns: '컬럼 설정 초기화',
+      rowsCount: '{count}개 행',
+      emptyRows: '표시할 데이터가 없습니다',
+      filterColumns: '컬럼 검색...',
+      toggleColumn: '{column} 컬럼 표시 전환',
+      page: '{total}페이지 중 {page}페이지',
+      previousPage: '이전 페이지',
+      nextPage: '다음 페이지',
     },
     policy: {
       title: '보안 & 정책 컴파일러',
@@ -837,6 +889,32 @@ export const translations: Record<Locale, Translations> = {
       openInTrino: 'Open in Trino',
       emptyState: 'No queryable table assets.',
       noTableSelected: 'Select a table asset.',
+      historyTitle: 'Query History',
+      historySubtitle: 'Recent query snapshot reported by the upstream Trino adapter (read-only, handles 503).',
+      historyUnavailable: 'Query history adapter is not connected or temporarily unavailable (503).',
+      historyEmpty: 'No query history reported.',
+      historyColumns: {
+        id: 'Query ID',
+        sql: 'Query SQL',
+        state: 'State',
+      },
+      readOnlyBadge: 'Read-only starter SQL',
+      editorAriaLabel: 'Trino starter SQL editor',
+    },
+    table: {
+      sortAscending: 'Sort ascending',
+      sortDescending: 'Sort descending',
+      clearSort: 'Clear sort',
+      columnsVisibility: 'Columns visibility',
+      showAllColumns: 'Show all columns',
+      resetColumns: 'Reset columns',
+      rowsCount: '{count} row(s)',
+      emptyRows: 'No data to display',
+      filterColumns: 'Search columns...',
+      toggleColumn: 'Toggle {column} visibility',
+      page: 'Page {page} of {total}',
+      previousPage: 'Previous page',
+      nextPage: 'Next page',
     },
     policy: {
       title: 'Security & Policy Compiler',
