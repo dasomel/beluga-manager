@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Clock, ExternalLink, Layers, Link2 } from 'lucide-react';
-import type { Pipeline } from '@beluga-manager/domain-api/schema';
+import type { HealthStatus, Pipeline, PipelineJob } from '@beluga-manager/domain-api/schema';
 import { Translations, type Locale } from '../i18n/translations';
 import { formatDateTime } from '../i18n/format';
 import { usePipelines, useServices } from '../api/hooks';
@@ -9,13 +9,37 @@ import { LoadingState, ErrorState } from '../components/QueryState';
 import { TopologyGraph, type TopologyGraphNode, type TopologyGraphEdge } from '../components/graph';
 import { getStageExternalUrl } from './pipelineStageLinks';
 
-function correlationKindToServiceType(kind: string): string | null {
-  if (kind.startsWith('kafka')) return 'kafka';
-  if (kind.startsWith('flink')) return 'flink';
-  if (kind.startsWith('iceberg')) return 'iceberg';
-  if (kind.startsWith('trino')) return 'trino';
-  if (kind.startsWith('airflow')) return 'airflow';
-  return null;
+/**
+ * Status mapping for correlation-graph nodes (D4: never show "healthy" without evidence).
+ *
+ * 1. Node refers to a job (job.id or job.name equals the reference id) -> from `job.lastRun.result`:
+ *    succeeded -> healthy, running -> healthy, failed -> degraded, unknown -> unknown;
+ *    no `lastRun` (never reported) -> unknown.
+ * 2. Node refers to a pipeline stage by EXACT serviceId -> that stage's status.
+ * 3. Anything else (e.g. a Kafka topic or Iceberg table: the stage status is the health of the
+ *    whole service, not of that object) -> unknown. No service-type guessing.
+ * "unknown" is rendered by StatusBadge with the text label and a distinct icon, never colour alone.
+ */
+export function inferJobStatus(job: PipelineJob): HealthStatus {
+  const result = job.lastRun?.result;
+  if (result === 'succeeded' || result === 'running') return 'healthy';
+  if (result === 'failed') return 'degraded';
+  return 'unknown';
+}
+
+export function inferCorrelationNodeStatus(
+  pipeline: Pick<Pipeline, 'stages' | 'jobs'>,
+  referenceId: string,
+): { status: HealthStatus; detail: string | null } {
+  const job = pipeline.jobs.find((j) => j.id === referenceId || j.name === referenceId);
+  if (job) {
+    return { status: inferJobStatus(job), detail: job.lastRun?.failureReason ?? null };
+  }
+  const stage = pipeline.stages.find((s) => s.serviceId === referenceId);
+  if (stage) {
+    return { status: stage.status, detail: stage.detail };
+  }
+  return { status: 'unknown', detail: null };
 }
 
 export function buildPipelineCorrelationGraph(
@@ -34,46 +58,26 @@ export function buildPipelineCorrelationGraph(
     const targetKey = `${link.target.kind}:${link.target.id}`;
 
     if (!nodeMap.has(sourceKey)) {
-      const sourceServiceType = correlationKindToServiceType(link.source.kind);
-      const matchingStage = pipeline.stages.find(
-        (s) => s.serviceId === link.source.id || (sourceServiceType !== null && s.serviceType === sourceServiceType),
-      );
-      const matchingJob = pipeline.jobs.find(
-        (j) => j.id === link.source.id || j.name === link.source.id,
-      );
-      const status = matchingJob
-        ? (matchingJob.lastRun?.result === 'failed' ? 'degraded' : 'healthy')
-        : matchingStage?.status;
-
+      const { status, detail } = inferCorrelationNodeStatus(pipeline, link.source.id);
       nodeMap.set(sourceKey, {
         id: sourceKey,
         title: t.pipelines.correlationKinds[link.source.kind] ?? link.source.kind,
         subtitle: link.source.id,
         badge: link.source.kind,
         status,
-        detail: matchingStage?.detail ?? (matchingJob?.lastRun?.failureReason ?? null),
+        detail,
       });
     }
 
     if (!nodeMap.has(targetKey)) {
-      const targetServiceType = correlationKindToServiceType(link.target.kind);
-      const matchingStage = pipeline.stages.find(
-        (s) => s.serviceId === link.target.id || (targetServiceType !== null && s.serviceType === targetServiceType),
-      );
-      const matchingJob = pipeline.jobs.find(
-        (j) => j.id === link.target.id || j.name === link.target.id,
-      );
-      const status = matchingJob
-        ? (matchingJob.lastRun?.result === 'failed' ? 'degraded' : 'healthy')
-        : matchingStage?.status;
-
+      const { status, detail } = inferCorrelationNodeStatus(pipeline, link.target.id);
       nodeMap.set(targetKey, {
         id: targetKey,
         title: t.pipelines.correlationKinds[link.target.kind] ?? link.target.kind,
         subtitle: link.target.id,
         badge: link.target.kind,
         status,
-        detail: matchingStage?.detail ?? (matchingJob?.lastRun?.failureReason ?? null),
+        detail,
       });
     }
 
@@ -99,10 +103,10 @@ interface PipelinesViewProps {
   t: Translations;
   locale?: Locale;
   initialPipelineId?: string;
-  theme?: 'light' | 'dark';
+  theme: 'light' | 'dark';
 }
 
-export const PipelinesView: React.FC<PipelinesViewProps> = ({ t, locale = 'en-US', initialPipelineId, theme = 'light' }) => {
+export const PipelinesView: React.FC<PipelinesViewProps> = ({ t, locale = 'en-US', initialPipelineId, theme }) => {
   const pipelinesQuery = usePipelines();
   const servicesQuery = useServices();
   const pipelines = pipelinesQuery.data?.data ?? [];

@@ -334,6 +334,8 @@ export interface Translations {
     viewDetails: string;
     selectedNode: string;
     summary: string;
+    edgeLabel: string;
+    dataIssuesNotice: string;
   };
 }
 
@@ -661,12 +663,14 @@ export const translations: Record<Locale, Translations> = {
       targetLabel: '도착',
       relationLabel: '관계',
       confidenceLabel: '신뢰도',
-      keyboardHint: 'Tab 또는 화살표 키로 노드를 이동하고 Enter 또는 스페이스바로 선택하세요',
+      keyboardHint: 'Tab으로 그래프에 진입하고 화살표 키로 노드 사이를 이동하며 Enter 또는 스페이스바로 선택하세요',
       emptyState: '표시할 노드 또는 연결이 없습니다',
       textAlternative: '스크린 리더를 위한 그래프 구조 표 대체 정보',
       viewDetails: '상세 정보',
       selectedNode: '선택된 노드',
       summary: '노드 {nodes}개 및 연결 {edges}개로 구성된 토폴로지 그래프입니다',
+      edgeLabel: '{source}에서 {target}(으)로 연결',
+      dataIssuesNotice: '그래프 데이터 문제: 중복 ID {duplicates}건은 첫 항목만 사용했고, 존재하지 않는 노드를 가리키는 연결 {dangling}건은 제외했습니다',
     },
   },
   'en-US': {
@@ -992,12 +996,14 @@ export const translations: Record<Locale, Translations> = {
       targetLabel: 'Target',
       relationLabel: 'Relation',
       confidenceLabel: 'Confidence',
-      keyboardHint: 'Use Tab or arrow keys to navigate between nodes, Enter or Space to select',
+      keyboardHint: 'Press Tab to enter the graph, arrow keys to move between nodes, Enter or Space to select',
       emptyState: 'No nodes or connections to display',
       textAlternative: 'Accessible table alternative for graph topology',
       viewDetails: 'View details',
       selectedNode: 'Selected Node',
       summary: 'Topology graph with {nodes} nodes and {edges} connections',
+      edgeLabel: '{source} connects to {target}',
+      dataIssuesNotice: 'Graph data issues: {duplicates} duplicate id(s) ignored (first occurrence kept), {dangling} connection(s) to missing nodes omitted',
     },
   },
 };

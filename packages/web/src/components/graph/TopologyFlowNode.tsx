@@ -2,51 +2,33 @@ import React from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { Translations } from '../../i18n/translations';
 import { StatusBadge } from '../StatusBadge';
+import { FOCUS_RING_CLASS, SELECTION_CLASS } from './theme';
 import type { TopologyGraphNode } from './types';
 
 export interface TopologyFlowNodeData extends Record<string, unknown> {
   node: TopologyGraphNode;
   t: Translations;
   isSelected: boolean;
+  /** Roving tabindex: exactly one node of a graph is the Tab stop (tabIndex 0), the rest are -1. */
+  isTabStop: boolean;
   onSelect?: (nodeId: string) => void;
+  onFocusNode?: (nodeId: string) => void;
 }
 
 export type TopologyFlowNodeType = Node<TopologyFlowNodeData, 'topology'>;
 
+/**
+ * The xyflow wrapper around this component is made non-focusable by TopologyGraph
+ * (nodesFocusable=false), so this element is the node's only focusable. Arrow-key movement is
+ * handled once per graph container (see TopologyGraph), not here.
+ */
 export function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeType>) {
-  const { node, t, isSelected, onSelect } = data;
+  const { node, t, isSelected, isTabStop, onSelect, onFocusNode } = data;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onSelect?.(node.id);
-      return;
-    }
-
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (typeof document !== 'undefined') {
-        const current = e.currentTarget;
-        const allNodes = Array.from(document.querySelectorAll<HTMLElement>('[data-topology-node="true"]'));
-        const index = allNodes.indexOf(current);
-        if (index >= 0 && index < allNodes.length - 1) {
-          allNodes[index + 1]?.focus();
-        }
-      }
-      return;
-    }
-
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (typeof document !== 'undefined') {
-        const current = e.currentTarget;
-        const allNodes = Array.from(document.querySelectorAll<HTMLElement>('[data-topology-node="true"]'));
-        const index = allNodes.indexOf(current);
-        if (index > 0) {
-          allNodes[index - 1]?.focus();
-        }
-      }
-      return;
     }
   };
 
@@ -57,20 +39,22 @@ export function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeType>) {
   return (
     <div
       role="button"
-      tabIndex={0}
+      tabIndex={isTabStop ? 0 : -1}
       data-topology-node="true"
       data-node-id={node.id}
-      aria-selected={isSelected}
+      aria-pressed={isSelected}
+      data-selected={isSelected ? 'true' : undefined}
       aria-label={accessibleName}
       onClick={() => onSelect?.(node.id)}
       onKeyDown={handleKeyDown}
-      className={`w-[220px] rounded-xl border bg-white dark:bg-slate-900 p-3.5 shadow-xs transition-all cursor-pointer text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-500 dark:focus-visible:ring-cyan-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-slate-900 ${
+      onFocus={() => onFocusNode?.(node.id)}
+      className={`w-[220px] rounded-xl border bg-white dark:bg-slate-900 p-3.5 shadow-xs transition-all motion-reduce:transition-none cursor-pointer text-left ${FOCUS_RING_CLASS} ${
         isSelected
-          ? 'border-cyan-500 dark:border-cyan-400 ring-2 ring-cyan-400/40 bg-cyan-50/20 dark:bg-cyan-950/20'
+          ? SELECTION_CLASS
           : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
       }`}
     >
-      <Handle type="target" position={Position.Left} className="!bg-slate-400 dark:!bg-slate-500" />
+      <Handle type="target" position={Position.Left} aria-hidden="true" className="!bg-slate-400 dark:!bg-slate-500" />
       <div className="flex items-center justify-between gap-1 mb-1.5">
         <span className="text-xs font-bold uppercase tracking-wide text-slate-900 dark:text-white font-mono truncate">
           {node.title}
@@ -85,7 +69,7 @@ export function TopologyFlowNode({ data }: NodeProps<TopologyFlowNodeType>) {
         {node.subtitle}
       </div>
       {node.status && <StatusBadge status={node.status} t={t} />}
-      <Handle type="source" position={Position.Right} className="!bg-slate-400 dark:!bg-slate-500" />
+      <Handle type="source" position={Position.Right} aria-hidden="true" className="!bg-slate-400 dark:!bg-slate-500" />
     </div>
   );
 }

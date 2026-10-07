@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ReactFlow,
   Background,
@@ -14,16 +14,44 @@ import { StatusBadge } from '../StatusBadge';
 import { LoadingState, ErrorState } from '../QueryState';
 import { TopologyFlowNode, type TopologyFlowNodeType } from './TopologyFlowNode';
 import { computeGraphLayout } from './layout';
-import type { TopologyGraphProps } from './types';
+import { findNextNodeId, isNavigationKey, resolveActiveNodeId } from './navigation';
+import { hasGraphDataIssues, sanitizeGraph } from './sanitize';
+import {
+  GRAPH_TOKENS,
+  MIN_TARGET_CLASS,
+  buildLiveSummary,
+  edgeAriaLabel,
+  nodeDisplayName,
+  shouldAnimateEdge,
+} from './theme';
+import type { TopologyGraphNode, TopologyGraphProps } from './types';
 
 const nodeTypes: NodeTypes = { topology: TopologyFlowNode };
-const EDGE_COLOR = '#94a3b8'; // slate-400
+
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+
+function subscribeReducedMotion(onChange: () => void): () => void {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
+  const mq = window.matchMedia(REDUCED_MOTION_QUERY);
+  mq.addEventListener('change', onChange);
+  return () => mq.removeEventListener('change', onChange);
+}
+
+function getReducedMotion(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(REDUCED_MOTION_QUERY).matches
+    : false;
+}
+
+function usePrefersReducedMotion(): boolean {
+  return useSyncExternalStore(subscribeReducedMotion, getReducedMotion, () => false);
+}
 
 export const TopologyGraph: React.FC<TopologyGraphProps> = ({
   t,
   theme = 'light',
-  nodes,
-  edges,
+  nodes: rawNodes,
+  edges: rawEdges,
   selectedNodeId = null,
   onSelectNode,
   isLoading = false,
@@ -35,9 +63,24 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
 }) => {
   const [viewMode, setViewMode] = useState<'graph' | 'table'>('graph');
 
+  // Graph and table both render from this one sanitized dataset so they cannot drift apart.
+  const sanitized = useMemo(() => sanitizeGraph(rawNodes, rawEdges), [rawNodes, rawEdges]);
+  const { nodes, edges } = sanitized;
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const edgeColor = GRAPH_TOKENS[theme].edge;
+
   const layoutPositions = useMemo(
     () => computeGraphLayout(nodes, edges),
     [nodes, edges],
+  );
+
+  const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n] as const)), [nodes]);
+  const tabStopId = resolveActiveNodeId(
+    nodes.map((n) => n.id),
+    activeId,
+    selectedNodeId,
   );
 
   const flowNodes = useMemo<TopologyFlowNodeType[]>(() => {
@@ -47,15 +90,22 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
         id: node.id,
         type: 'topology',
         position: pos,
+        // The inner element is the single focusable; the xyflow wrapper is neutral (no tabindex,
+        // no "group" role, no roledescription) so a node is one Tab-stop-candidate, not two.
+        focusable: false,
+        ariaRole: 'presentation',
+        domAttributes: { 'aria-roledescription': undefined },
         data: {
           node,
           t,
           isSelected: selectedNodeId === node.id,
+          isTabStop: tabStopId === node.id,
           onSelect: onSelectNode,
+          onFocusNode: setActiveId,
         },
       };
     });
-  }, [nodes, layoutPositions, selectedNodeId, onSelectNode, t]);
+  }, [nodes, layoutPositions, selectedNodeId, tabStopId, onSelectNode, t]);
 
   const flowEdges = useMemo<Edge[]>(() => {
     return edges.map((edge) => ({
@@ -64,18 +114,46 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
       target: edge.target,
       label: edge.label,
       type: 'smoothstep',
-      animated: edge.dashed,
+      focusable: false,
+      ariaLabel: edgeAriaLabel(t, edge, nodeById),
+      animated: shouldAnimateEdge(edge.dashed, prefersReducedMotion),
       style: {
-        stroke: EDGE_COLOR,
+        stroke: edgeColor,
         strokeWidth: 2,
         strokeDasharray: edge.dashed ? '5,5' : undefined,
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: EDGE_COLOR,
+        color: edgeColor,
       },
     }));
-  }, [edges]);
+  }, [edges, edgeColor, prefersReducedMotion, nodeById, t]);
+
+  // Spatial arrow-key navigation, scoped to THIS graph's container (never `document`).
+  const handleGraphKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!isNavigationKey(e.key) || e.altKey || e.ctrlKey || e.metaKey) return;
+      const container = containerRef.current;
+      const target = e.target as HTMLElement | null;
+      const nodeEl = target?.closest<HTMLElement>('[data-topology-node="true"]');
+      if (!container || !nodeEl || !container.contains(nodeEl)) return;
+      const currentId = nodeEl.getAttribute('data-node-id');
+      if (currentId === null) return;
+      e.preventDefault(); // keep arrows from scrolling the page while a node has focus
+      const points = nodes.map((n) => {
+        const p = layoutPositions.get(n.id) ?? n.position ?? { x: 0, y: 0 };
+        return { id: n.id, x: p.x, y: p.y };
+      });
+      const nextId = findNextNodeId(points, currentId, e.key);
+      if (nextId === null) return;
+      setActiveId(nextId);
+      const nextEl = Array.from(
+        container.querySelectorAll<HTMLElement>('[data-topology-node="true"]'),
+      ).find((el) => el.getAttribute('data-node-id') === nextId);
+      nextEl?.focus();
+    },
+    [nodes, layoutPositions],
+  );
 
   if (isLoading) {
     return <LoadingState t={t} />;
@@ -93,10 +171,15 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
     );
   }
 
-  const summaryText = interpolate(t.graph.summary, {
-    nodes: String(nodes.length),
-    edges: String(edges.length),
-  });
+  const selectedNode: TopologyGraphNode | undefined =
+    selectedNodeId !== null ? nodeById.get(selectedNodeId) : undefined;
+  const summaryText = buildLiveSummary(t, nodes, edges, selectedNode);
+  const issuesNotice = hasGraphDataIssues(sanitized)
+    ? interpolate(t.graph.dataIssuesNotice, {
+        duplicates: String(sanitized.duplicateNodeIds.length + sanitized.duplicateEdgeIds.length),
+        dangling: String(sanitized.danglingEdgeCount),
+      })
+    : null;
 
   return (
     <div className={`space-y-3 ${className}`}>
@@ -107,7 +190,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
             type="button"
             onClick={() => setViewMode('graph')}
             aria-pressed={viewMode === 'graph'}
-            className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+            className={`${MIN_TARGET_CLASS} px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
               viewMode === 'graph'
                 ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -120,7 +203,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
             type="button"
             onClick={() => setViewMode('table')}
             aria-pressed={viewMode === 'table'}
-            className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+            className={`${MIN_TARGET_CLASS} px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors ${
               viewMode === 'table'
                 ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -140,12 +223,23 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
       </div>
 
       {/* Screen reader summary announcement */}
-      <div className="sr-only" aria-live="polite">
+      <div className="sr-only" role="status" aria-live="polite">
         {summaryText}
       </div>
 
+      {issuesNotice && (
+        <p
+          role="status"
+          className="rounded-lg border border-amber-300 dark:border-amber-500/50 bg-amber-50 dark:bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-900 dark:text-amber-200"
+        >
+          {issuesNotice}
+        </p>
+      )}
+
       {viewMode === 'graph' ? (
         <div
+          ref={containerRef}
+          onKeyDown={handleGraphKeyDown}
           className="relative rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-50 dark:bg-slate-950"
           style={{ height }}
           role="region"
@@ -159,6 +253,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
             onPaneClick={() => onSelectNode?.(null)}
             nodesDraggable={false}
             nodesConnectable={false}
+            nodesFocusable={false}
+            edgesFocusable={false}
+            disableKeyboardA11y
             zoomOnDoubleClick={false}
             colorMode={theme}
             proOptions={{ hideAttribution: true }}
@@ -199,9 +296,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
                           <button
                             type="button"
                             onClick={() => onSelectNode?.(node.id)}
-                            className="text-left hover:underline text-cyan-700 dark:text-cyan-400 font-bold"
+                            className={`${MIN_TARGET_CLASS} inline-flex items-center text-left hover:underline text-cyan-700 dark:text-cyan-400 font-bold`}
                           >
-                            {node.title}: {node.subtitle}
+                            {nodeDisplayName(node)}
                           </button>
                         </td>
                         <td className="px-3 py-2 text-slate-600 dark:text-slate-300 font-mono">
@@ -239,8 +336,12 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-800 bg-white dark:bg-slate-900">
                     {edges.map((edge) => (
                       <tr key={edge.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/60">
-                        <td className="px-3 py-2 font-mono text-slate-900 dark:text-white">{edge.source}</td>
-                        <td className="px-3 py-2 font-mono text-slate-900 dark:text-white">{edge.target}</td>
+                        <td className="px-3 py-2 font-mono text-slate-900 dark:text-white">
+                          {nodeById.has(edge.source) ? nodeDisplayName(nodeById.get(edge.source)!) : edge.source}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-slate-900 dark:text-white">
+                          {nodeById.has(edge.target) ? nodeDisplayName(nodeById.get(edge.target)!) : edge.target}
+                        </td>
                         <td className="px-3 py-2 text-slate-600 dark:text-slate-300">{edge.label ?? '-'}</td>
                         <td className="px-3 py-2 font-mono text-slate-600 dark:text-slate-300">
                           {edge.confidence !== undefined ? `${Math.round(edge.confidence * 100)}%` : '-'}
