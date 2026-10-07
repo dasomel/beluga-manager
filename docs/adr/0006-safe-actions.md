@@ -8,7 +8,7 @@
 - **Related**: [ADR-0002](0002-backend-api-technology.md) (Hono + TypeScript Domain API, OPA authorization delegation), [ADR-0004](0004-hierarchical-data-asset-api.md) (Catalog hierarchy, ABAC/RBAC alignment), `AGENTS.md` (read-first principle, boundary between upstream OSS APIs and unified domain), `docs/architecture.md` (Design Principles, Ownership Boundaries), `.agents/skills/beluga-manager-integration-contract/SKILL.md` (read-first scope, mutation criteria).
 - **Deciders**: dasomel
 
-Conventions: **Current state** sections state only what was observed (with a file:line or a command that was run, evidence date 2026-10-07). **Proposal** sections are design intent. Every number (TTL, timeout, retention) is labelled *Proposed*. External facts carry an official URL opened on 2026-10-07, or are marked *not verified*.
+Conventions: **Current state** sections state only what was observed (with a file:line or a command that was run, evidence date 2026-10-07). **Proposal** sections are design intent. Beluga repo file:line citations are as of beluga commit `1df61e0` (`origin/main`, read 2026-10-07/08); live-cluster outputs are as measured on 2026-10-07. Every number (TTL, timeout, retention) is labelled *Proposed*. External facts carry an official URL opened on 2026-10-07, or are marked *not verified*.
 
 ## Context
 

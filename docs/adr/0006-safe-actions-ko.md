@@ -8,7 +8,7 @@
 - **관련**: [ADR-0002](0002-backend-api-technology-ko.md) (Hono + TypeScript Domain API, OPA 인가 위임), [ADR-0004](0004-hierarchical-data-asset-api-ko.md) (카탈로그 계층, ABAC/RBAC 정합), `AGENTS.md` (read-first 원칙, 업스트림 OSS API와 통합 도메인의 경계), `docs/architecture.md` (Design Principles, Ownership Boundaries), `.agents/skills/beluga-manager-integration-contract/SKILL.md` (read-first 범위, 변경 기준).
 - **의사결정자**: dasomel
 
-표기 규칙: **현재 상태** 절은 관측한 사실만 적습니다(file:line 또는 실제 실행한 명령, 근거 일자 2026-10-07). **제안** 절은 설계 의도입니다. 모든 수치(TTL, 타임아웃, 보존 기간)에는 *Proposed*를 표기합니다. 외부 사실은 2026-10-07에 실제로 연 공식 URL을 달거나 *not verified*로 표기합니다.
+표기 규칙: **현재 상태** 절은 관측한 사실만 적습니다(file:line 또는 실제 실행한 명령, 근거 일자 2026-10-07). **제안** 절은 설계 의도입니다. Beluga 레포의 file:line 인용은 beluga 커밋 `1df61e0`(`origin/main`, 2026-10-07/08 열람) 기준이고, 라이브 클러스터 출력은 2026-10-07 측정값입니다. 모든 수치(TTL, 타임아웃, 보존 기간)에는 *Proposed*를 표기합니다. 외부 사실은 2026-10-07에 실제로 연 공식 URL을 달거나 *not verified*로 표기합니다.
 
 ## 배경(Context)
 
