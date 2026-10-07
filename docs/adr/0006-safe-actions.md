@@ -1,247 +1,231 @@
 # ADR-0006: Safe Actions — Controlled Operational Actions
 
 - **Status**: Proposed — design proposal; no operational action API or mutating execution path is implemented by this ADR.
-  Note on numbering: Per ADR index and prompt instruction `(check the next free numbers)`, ADR-0005 was allocated to Deployment & GitOps Integration (PR #113); this Safe Actions proposal is numbered ADR-0006.
+  Note on numbering: ADR-0005 is Deployment & GitOps Integration (PR #113); this Safe Actions proposal is numbered ADR-0006.
 - **Date**: 2026-10-07
 - **Issue**: [#21 [ROADMAP][UX] Safe Actions — Controlled Operational Actions](https://github.com/dasomel/beluga-manager/issues/21)
 - **Parent epic**: #1
-- **Related**: [ADR-0002](0002-backend-api-technology.md) (Hono + TypeScript Domain API, OPA authorization delegation), [ADR-0004](0004-hierarchical-data-asset-api.md) (Catalog hierarchy, ABAC/RBAC alignment), `AGENTS.md` (read-first principle, boundary between upstream OSS APIs and unified domain), `docs/architecture.md` (Ownership Boundaries, Navigation / Information Architecture), `.agents/skills/beluga-manager-integration-contract/SKILL.md` (read-first scope, mutation criteria).
+- **Related**: [ADR-0002](0002-backend-api-technology.md) (Hono + TypeScript Domain API, OPA authorization delegation), [ADR-0004](0004-hierarchical-data-asset-api.md) (Catalog hierarchy, ABAC/RBAC alignment), `AGENTS.md` (read-first principle, boundary between upstream OSS APIs and unified domain), `docs/architecture.md` (Design Principles, Ownership Boundaries), `.agents/skills/beluga-manager-integration-contract/SKILL.md` (read-first scope, mutation criteria).
 - **Deciders**: dasomel
+
+Conventions: **Current state** sections state only what was observed (with a file:line or a command that was run, evidence date 2026-10-07). **Proposal** sections are design intent. Every number (TTL, timeout, retention) is labelled *Proposed*. External facts carry an official URL opened on 2026-10-07, or are marked *not verified*.
 
 ## Context
 
-Beluga Manager is designed as a unified integration and control-plane layer over the Beluga Data Platform. As established in `AGENTS.md` and `docs/architecture.md`, the platform operates under a strict **read-first** baseline: current shipping APIs and frontend views (`Overview`, `Services`, `Pipelines`, `DataCatalog`, `Operations`) provide inspection, correlation, and discovery without initiating mutations on the underlying infrastructure or data engines.
+Beluga Manager is a unified integration layer over the Beluga Data Platform. `AGENTS.md` and `docs/architecture.md` establish a **read-first** baseline: shipping APIs and views (Overview, Services, Pipelines, Data, Operations) inspect and correlate; they do not mutate the underlying systems.
 
-However, operational data platform maintenance routinely requires targeted interventions:
-1. Data engineers need to trigger scheduled or ad-hoc Airflow DAG runs when upstream ingest batches arrive.
-2. Streaming engineers must trigger stateful savepoints and perform controlled stop/restart operations on Apache Flink jobs when schema or business logic updates occur.
-3. Platform operators require on-demand metadata cache invalidation or re-synchronization when catalogs or schemas diverge.
-4. Transient failures in upstream connector tasks (e.g. Debezium CDC) require controlled restart without restarting the entire container pod.
+Operational maintenance still raises recurring requests (issue #21): triggering an Airflow DAG run when an upstream batch arrives; savepoint / stop-restart of Flink jobs; metadata cache refresh; restarting a failed connector task. Issue #21 asks for controlled mutations that do not require engineers to hold broad cluster credentials. This ADR proposes the framework and, deliberately, a much narrower first step than the earlier draft.
 
-In the predecessor system (Narwhal Portal), a pattern of **limited operational Job execution** was adopted to allow controlled administrative tasks without granting engineers broad cluster-admin credentials. Issue #21 calls for adapting that pattern into Beluga Manager while preventing uncontrolled mutations, accidental data loss, authorization bypasses, or silent race conditions.
+### Current state (observed)
 
-### Upstream Verification & Authoritative Systems
-Upstream components relevant to Safe Actions in Beluga (verified in `beluga/VERSIONS.md` and live cluster inspection):
-- **Apache Flink Kubernetes Operator 1.15.0 / Flink 1.20.0**: Job lifecycle management and savepoint operations. Official documentation: [Apache Flink 1.20 REST API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/rest_api/) (access date: 2026-10-07); [Flink Kubernetes Operator Job Management](https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.15/docs/custom-resource/job-management/) (access date: 2026-10-07).
-- **Apache Airflow 3.3.0**: DAG triggering and task clearing. Official documentation: [Airflow 3.3 REST API](https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html#operation/post_dag_run) (access date: 2026-10-07).
-- **Strimzi Kafka Operator 1.1.0 / Kafka 4.3.0**: KRaft-based event streaming. Official documentation: [Strimzi Kafka Operator Overview](https://strimzi.io/docs/operators/latest/overview.html) (access date: 2026-10-07).
-- **Open Policy Agent (OPA) 1.19.0-static & OpenFGA 1.18.3**: Central authorization engine and fine-grained relationship authorization backend. Official documentation: [OPA REST API](https://www.openpolicyagent.org/docs/latest/rest-api/) (access date: 2026-10-07); [OpenFGA Check API](https://openfga.dev/api/service#Relationship%20Queries/Check) (access date: 2026-10-07).
-- **Keycloak 26.7.1**: Central identity and role provider (`admins`, `engineers`, `analysts`).
+| Fact | Evidence |
+|---|---|
+| The domain API has **no authentication middleware** and no per-caller authorization. | `docs/IMPLEMENTATION-STATUS.md:30` ("the app has no auth middleware"); `packages/domain-api/src/app.ts:46-52` registers only a CORS middleware (origin `http://localhost:5180`). CORS is not an authentication or CSRF control. |
+| The domain API has no database or cache dependency (no Postgres/Redis client). | `grep -rn -i "postgres\|redis" packages/domain-api/package.json packages/domain-api/src` matches only policy-target enum/fixture strings (`schema/policy.ts`, `stub-data/policies.ts`), not clients. |
+| Flink runs under the Flink Kubernetes Operator as `FlinkDeployment/flink-cluster` (ns `streaming`) with **no `spec.job`**, i.e. a **session cluster**. | Beluga `gitops/charts/beluga-data/templates/05-flink-operator.yaml:1-9` (no `job:` block); live `kubectl -n streaming get flinkdeployment flink-cluster -o jsonpath='{.spec.job}'` returned empty, lifecycle `STABLE`; `kubectl get flinksessionjob -A` returned "No resources found". |
+| Flink jobs are submitted by an ArgoCD **Sync hook** Job (`flink-sql-submit`) using `sql-client.sh` against `flink-cluster-rest:8081`, not by operator-managed CRs. The hook re-runs on every sync and **resubmits any pipeline whose job is not in an active state; FAILED/CANCELED/FINISHED are deliberately treated as "resubmit" ("desired auto-recovery")**. | Beluga `gitops/charts/beluga-data/templates/14-flink-jobs.yaml:22-28` (hook annotations), `:151-154` (D2 comment, `ACTIVE_STATE_RE`), `submit()` function at `:189`. Live: `kubectl -n streaming get jobs` shows `flink-sql-submit` Complete. |
+| ArgoCD Application `beluga-data` has `automated: {prune: true, selfHeal: true}`. | Beluga `gitops/apps/beluga-data.yaml:19-22`; live `kubectl -n argocd get application beluga-data -o jsonpath='{.spec.syncPolicy}'`. |
+| No savepoint directory is configured anywhere in the Beluga gitops (`git grep -i savepoint` over `origin/main` hits only `docs/ha-dr-objectives*.md` and `docs/upgrade-rollback-procedures*.md`, no manifest). Checkpointing interval is 30s. | Beluga `05-flink-operator.yaml:14` (`execution.checkpointing.interval: "30s"`); grep run on `refs/remotes/origin/main`. |
+| The Flink REST API is described by Beluga as an unauthenticated dashboard/REST surface. | Beluga `docs/critical-interfaces-inventory.md:29`. |
+| Airflow is 3.3.0 and uses the FAB auth manager with Keycloak OIDC for UI login. | Beluga `VERSIONS.md:36`; `gitops/charts/beluga-data/templates/07-airflow.yaml:196-197` (`FabAuthManager`), `:74-94` (OAuth/Keycloak). |
+| The CNPG cluster is `postgres-main` in namespace `database`. | Beluga `gitops/charts/beluga-data/templates/02-cnpg.yaml:3-5`; live `kubectl -n database get clusters.postgresql.cnpg.io` -> `postgres-main`. |
+| ArgoCD `selfHeal` silently reverts out-of-band edits. | Beluga `docs/mistakes-log.md:49` (2026-08-25 entry). |
+
+### External references (opened 2026-10-07)
+
+- Flink 1.20 REST API — <https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/rest_api/> (opened 2026-10-07): documents `POST /jobs/:jobid/savepoints` (body: `target-directory`, `cancel-job`, `formatType`), `POST /jobs/:jobid/stop` (body: `drain`, `targetDirectory`, `formatType`), and `GET /jobs/:jobid/savepoints/:triggerid` (status `IN_PROGRESS`/`COMPLETED`, `location`); all asynchronous with a trigger id.
+- Flink Kubernetes Operator 1.15 job management — <https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.15/docs/custom-resource/job-management/> (opened 2026-10-07): `upgradeMode` has `stateless` / `last-state` / `savepoint`; desired state via `JobSpec.state` (`running`/`suspended`); applies to `FlinkDeployment` and `FlinkSessionJob`. The page I opened does **not** describe a CR-based manual savepoint trigger (`savepointTriggerNonce` was not found there: *not verified*) and does **not** say how the operator treats jobs submitted to a session cluster by other means (*not verified*).
+- Flink Kubernetes Operator 1.15 custom resource overview — <https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.15/docs/custom-resource/overview/> (opened 2026-10-07): `FlinkSessionJob` is described with a jar-based job spec (`jarURI`); SQL-client submissions are not mentioned there (*not verified*).
+- Airflow stable docs index — <https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html> (opened 2026-10-07): confirms the stable docs are for Airflow 3.3.x, but the fetched content was only a navigation index. **The Airflow 3 REST base path (believed to be `/api/v2`), the trigger-DAG-run endpoint shape and the auth scheme for the FAB auth manager are *not verified*.** The only auth statement I verified: <https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/auth-manager/simple/token.html> (opened 2026-10-07) says a JWT is created via `POST /auth/token` for the *simple* auth manager — Beluga uses FAB, so that is not evidence for Beluga. The earlier draft's Airflow 2-style `/api/v1/dags/{dag_id}/dagRuns` is removed.
+- OPA, OpenFGA, Strimzi documentation links from the earlier draft were **not re-opened** in this revision: *not verified*, and they are no longer cited as facts.
 
 ## Decision Drivers
 
-1. **Read-First & Safety Invariant**: The default posture remains read-only. Mutating actions must be explicit, strictly scoped, and incapable of executing through plain GET requests or accidental clicks.
-2. **Multi-Tier Safeguards**: Destructive or operational actions must follow a rigorous lifecycle: dry-run pre-flight check -> explicit user confirmation with impact preview -> atomic execution with idempotency protection -> immutable audit trail.
-3. **Non-Bypassable Authorization**: Action execution must enforce Keycloak role checks via OPA (`beluga/policies/`) and object-level relationship checks via OpenFGA. An action triggered through the Manager must never bypass Lakehouse catalog authorization or grant broader permissions than the user's platform identity.
-4. **Idempotency & Concurrency Control**: Replaying a network request or clicking a button twice must not trigger duplicate DAG runs or corrupt Flink state saves.
-5. **Clear Blast-Radius & Scope Restriction**: Actions must be bounded by namespace and resource identifiers; wildcard operations are forbidden.
-6. **Reversibility & Rollback Guidance**: Actions that transition workload state must have defined recovery paths or savepoint restore targets.
+1. **Read-first**: mutations must be explicit, strictly scoped, and impossible through GET or an accidental click.
+2. **Authentication and authorization first**: no mutating path may exist before real caller authentication and per-action authorization (see Hard Prerequisite).
+3. **Respect GitOps and operators**: an action must not fight ArgoCD `selfHeal` or an operator's reconciler, and must not create state that the next sync silently undoes or duplicates.
+4. **Idempotency and replay protection**: a retried request or double click must not cause a duplicate effect.
+5. **Auditability**: every attempt (allowed, denied, failed) is recorded, with honest claims about what the record protects against.
+6. **Bounded blast radius**: namespace- and resource-scoped; no wildcards.
 
 ## Considered Options
 
-### Option 1: Direct Reverse Proxy to Upstream OSS Write APIs
-The Domain API or UI proxies write requests directly to upstream endpoints (e.g. forwarding `POST` requests to `airflow.local.beluga.internal/api/v1/dags/{dag_id}/dagRuns` or Flink JobManager `POST /jobs/{jobid}/savepoints`).
+### Option 1: Reverse-proxy upstream write APIs
+Forward writes to upstream endpoints (Airflow, Flink REST). **Rejected**: bypasses unified authorization and audit, leaks upstream error formats, and (for Flink) exposes an unauthenticated REST surface (see Current state) through the Manager.
 
-- **Pros**: Minimal implementation overhead; no action state management needed in Beluga Manager.
-- **Cons**: Violates `AGENTS.md` and integration boundaries; leaks upstream OSS error formats into the client; bypasses unified audit logging; cannot enforce unified OPA/Keycloak authorization across disparate upstream tools; cannot offer dry-run/preview consistency.
-- **Outcome**: **Rejected**.
+### Option 2: Embedded workflow engine (e.g. Temporal)
+**Rejected**: duplicates Airflow/operators and adds stateful infrastructure; conflicts with `docs/architecture.md` Design Principle 3 ("No unnecessary duplication").
 
-### Option 2: Full Autonomous Workflow Engine inside Manager
-Embed a general-purpose workflow orchestration engine (e.g., Temporal or custom saga orchestrator) in the Domain API to orchestrate complex multi-step infrastructure mutations.
-
-- **Pros**: Handles arbitrary distributed state machines with automatic compensations.
-- **Cons**: Severe violation of principle 3 ("No unnecessary duplication"); duplicates Airflow and Kubernetes operators; adds significant operational footprint and stateful storage dependencies to Beluga Manager.
-- **Outcome**: **Rejected**.
-
-### Option 3: Unified Safe Action Framework with Two-Phase Execution & Action Adapters (Proposed)
-Define a lightweight, declarative Safe Action Framework in the Domain API. Mutating operations are modeled as first-class domain capabilities exposed by capability-aware service adapters. Execution uses a two-phase pattern:
-1. `POST /api/v1/actions/preview` evaluates parameters, runs pre-flight checks against upstream APIs, evaluates OPA/OpenFGA policies, and returns a preview token with estimated blast radius.
-2. `POST /api/v1/actions/execute` accepts the preview token, an `idempotencyKey`, and parameter overrides, executes the action via the adapter, records an audit event, and returns a tracking record.
-
-- **Pros**: Strictly preserves the read-first architecture; guarantees authorization and audit enforcement; isolates upstream protocols behind adapters; provides unified UI UX for confirmations and dry-runs.
-- **Cons**: Requires explicit schema definitions and adapter implementations for each supported action type.
+### Option 3: Safe Action framework with two-phase execution and adapters (Proposed)
+Two-phase `preview` then `execute` through per-action adapters, gated by authenticated identity and per-action authorization.
+- **Pros**: preserves read-first; one place for authz/audit; upstream protocols stay behind adapters.
+- **Cons**: needs a persistence layer, per-action adapters, and the authentication prerequisite below.
 - **Outcome**: **Proposed**.
 
-## Decision Outcome
+## Decision Outcome (Proposal)
 
-**Proposed choice: Option 3 (Unified Safe Action Framework with Two-Phase Execution)**.
+### 0. HARD PREREQUISITE — authentication and authorization (nothing mutating ships before this)
 
-### 1. Risk Classification Matrix
-All candidate actions are categorized into four standardized risk classes:
+Because the domain API currently has no authentication (Current state), **no mutating route, adapter or UI control may be merged or enabled until all of the following exist and are tested**. The preview/execute endpoints must fail closed (HTTP 401/403) when any item is not configured.
 
-| Class | Category | Characteristics | Phase 1 Status | Examples |
-|---|---|---|---|---|
-| **Class 0** | Inspection | Purely read-only; zero mutation. | Implemented | `GET /api/v1/services`, health checks, log link generation. |
-| **Class 1** | Safe Maintenance | Idempotent, zero-downtime, non-destructive refresh or cache invalidation. | **In Scope (Phase 1)** | Catalog metadata re-sync, schema cache refresh, query history buffer flush. |
-| **Class 2** | Controlled Operational Mutation | State-altering or workload-affecting, but controlled, graceful, and repeatable. | **In Scope (Phase 1)** | Airflow DAG trigger with params, Flink job savepoint trigger, Flink graceful stop-with-savepoint. |
-| **Class 3** | High-Risk / Infrastructure / Destructive | Potential data loss, pod lifecycle disruption, or permanent state deletion. | **Out of Scope (Phase 1)** (Default disabled) | Kafka topic creation/deletion/partition rebalance, Kubernetes Pod deletion/restart, volume cleanup. |
+1. **Real token validation**: validate Keycloak-issued OIDC access tokens (JWT) on every `/api/*` mutating route — signature via the realm JWKS, `iss`, `aud`, `exp`/`nbf`, with the algorithm pinned. Keycloak is the identity source in Beluga (`VERSIONS.md:38`). Exact claim and role names (e.g. which claim carries roles) are *not verified* and must be taken from the live realm configuration before implementation.
+2. **Per-action authorization on every execute** (not only at preview): a policy decision keyed by caller identity, action type and target resource. Mechanism (OPA, OpenFGA, or in-process role check) is an open question; the decision must be re-evaluated at execute time because roles may change between preview and execute.
+3. **CSRF**: Proposed — mutating routes accept the credential only as an `Authorization: Bearer` header, never from a cookie, so a cross-site request cannot carry it. If a cookie session is ever introduced for the web UI, mutating routes additionally require a CSRF token, `SameSite=Strict`/`Lax` cookies and an `Origin` allow-list check. The existing localhost CORS config is not a CSRF control.
+4. **Confused deputy**: the Manager will call upstream systems with its own service credential, which is broader than any one caller. Proposed rules: (a) authorize the *caller's* identity for the specific action and target before any upstream call; (b) one narrowly-scoped credential per adapter, limited to the single operation that adapter performs; (c) record both the caller (`actor`) and the service principal used in the audit entry; (d) never accept an upstream URL, namespace or credential from the request — only allow-listed targets from configuration. Whether the upstreams can accept the caller's token (token exchange / forwarding) instead is *not verified* and is an open question.
+5. **Replay and idempotency**: see section 3.
+6. **Audit tamper resistance**: see section 4.
 
-### 2. Candidate Action Catalogue for Phase 1 vs Out of Scope
+### 1. Risk classes
 
-#### Phase 1 In-Scope Actions:
-1. **`catalog.metadata.resync` (Class 1)**:
-   - Target: Iceberg REST Catalog (`lakekeeper`) or Trino catalog metadata.
-   - Purpose: Force cache invalidation in Manager and trigger Iceberg catalog refresh for a specific catalog/schema.
-   - Safety: Fully idempotent; zero impact on active queries.
-2. **`airflow.dag.trigger` (Class 2)**:
-   - Target: Airflow DAG (`orchestration` namespace).
-   - Purpose: Trigger a DAG run with optional JSON configuration parameters.
-   - Pre-flight / Dry-run: Verify DAG exists and is not paused (`is_paused == false`); validate JSON payload schema against expected DAG parameters.
-   - Idempotency: `dag_run_id` deterministically derived from `idempotencyKey` to prevent double-scheduling.
-3. **`flink.job.savepoint` (Class 2)**:
-   - Target: Active Flink streaming job on `flink-kubernetes-operator` (`streaming` namespace).
-   - Purpose: Trigger an asynchronous savepoint to S3 storage (`s3://beluga-lake/savepoints/`) without stopping the job.
-   - Pre-flight / Dry-run: Verify job status is `RUNNING`; verify SeaweedFS S3 storage endpoint is reachable; verify target directory permission.
-4. **`flink.job.graceful-stop` (Class 2)**:
-   - Target: Active Flink streaming job.
-   - Purpose: Stop Flink job with savepoint (`stop-with-savepoint`).
-   - Pre-flight / Dry-run: Check for downstream pipeline dependencies (e.g. active Iceberg sink tables); require explicit two-step user confirmation in the UI.
+| Class | Category | Characteristics | Examples |
+|---|---|---|---|
+| 0 | Inspection | Read-only | existing `GET` routes |
+| 1 | Reversible, additive trigger | Creates new work without altering existing state; can be ignored/cancelled by the owning system | Airflow DAG run trigger |
+| 2 | Workload-affecting | Alters or interrupts a running workload, or interacts with an operator/GitOps-reconciled resource | Flink savepoint / stop |
+| 3 | Infrastructure / destructive | Pod lifecycle, Kafka topic, table drop/purge | out of scope |
 
-#### Explicitly Out of Scope for Phase 1:
-- **Kubernetes Pod / Service restart**: Modifying Pod lifecycle directly bypasses ArgoCD GitOps (`selfHeal: true` will conflict or revert; see mistakes-log). Any infrastructure change belongs in GitOps.
-- **Kafka topic partition manipulation / topic deletion**: Topic definitions are authoritative in Strimzi `KafkaTopic` custom resources. Deleting or resizing topics via runtime API causes GitOps drift.
-- **Iceberg Table drop / purge**: Destructive table drops are strictly forbidden via the Manager UI; must be executed through authenticated Trino SQL with RBAC audit.
+### 2. Phasing (narrowed from the earlier draft)
 
-### 3. Safety Guarantees & Enforcement Pipeline
+- **Phase 0**: the hard prerequisite above. Nothing else starts before it is done.
+- **Phase 1 — preview-only (no upstream mutation)**: implement the framework (schemas, authorization, preview, audit of preview/denied attempts) with **no execute adapter enabled**. The preview performs read-only pre-flight checks. This delivers the UX and the security plumbing at zero mutation risk. Rationale: the earlier draft put Flink stop in Phase 1, wider than the read-first principle justifies.
+- **Phase 2 — first executable action: `airflow.dag.trigger` (Class 1)**, only after Phase 1 is exercised in a real environment. It is the lowest-risk mutation: it adds a DAG run and does not alter existing runs. Pre-flight: DAG exists and is not paused; payload validated against an allow-listed schema. Airflow 3 base path, endpoint, request shape and service-to-service auth are *not verified* (see External references) and are a precondition of Phase 2. Whether Airflow 3 lets the caller choose the run id (needed for deterministic idempotency) is *not verified*; if not, idempotency is enforced only on the Manager side (section 3), which cannot prevent a duplicate if the Manager crashes between the upstream call and recording the result — this must be stated in the UI as "at-least-once under failure".
+- **Not scheduled**: Flink actions (analysis below), catalog metadata resync (I could not identify an authoritative refresh API for Lakekeeper/Trino metadata, so the action is *not verified* and has no defined target; it needs a spike before being proposed again), connector restart, Class 3.
+
+### 2a. Flink: why Flink actions are deferred, and the analysis behind it
+
+Same style of argument the ADR uses to forbid pod restarts, applied to Flink using the Current state facts:
+
+1. **What the operator owns.** `flink-cluster` is a session cluster with no `spec.job`; the operator reconciles the cluster (JobManager/TaskManagers), not the SQL jobs. The jobs were submitted by `sql-client.sh` from the `flink-sql-submit` hook (`14-flink-jobs.yaml`). Whether the operator tracks such jobs is *not verified* from the docs I opened; the observed fact is that the live `FlinkDeployment` has no job status (`kubectl get flinkdeployment` shows an empty JOB STATUS column).
+2. **What ArgoCD does to a stop/cancel.** `beluga-data` has `selfHeal: true` and the `flink-sql-submit` hook re-runs on every sync. The hook skips a pipeline only when its job is in an active state; **a job that is CANCELED or FINISHED (the result of `stop` with or without `cancel-job`) is resubmitted on the next sync, from SQL, without restoring the savepoint** (the submit path passes no restore option; see `submit()` in `14-flink-jobs.yaml`). So a Manager-issued REST stop is silently undone at the next sync and the new job starts from scratch semantics of its connectors (Kafka offsets / Iceberg sink behaviour not analysed here), which is worse than the original state. This is the same selfHeal trap recorded in `docs/mistakes-log.md:49`.
+3. **A savepoint without stop** (`POST /jobs/:jobid/savepoints` with `cancel-job=false`) does not change job state and therefore does not fight the hook or selfHeal. But there is **no configured savepoint directory** (Current state), so the target would have to be supplied by the Manager; the earlier draft's `s3://beluga-lake/savepoints/` is therefore *a proposal*, not an existing path. S3 credentials are injected into the Flink pods (`05-flink-operator.yaml:64-80`), so no extra credential would be needed by the Manager; permissions on the bucket path are *not verified*.
+4. **Operator-native alternatives**, and why they do not fit today: `FlinkSessionJob` with `upgradeMode`/`state: suspended` is jar-based (`jarURI`) per the overview page, while Beluga's jobs are SQL-client submitted; adopting it means re-packaging the three pipelines as jars and changing the GitOps manifests in the Beluga repo — a platform decision outside this ADR. CR-triggered savepoints (`savepointTriggerNonce`) were *not verified* in the 1.15 pages I opened. Any operator-native path edits a CR that ArgoCD owns, so it must go through Git (a PR to the Beluga repo), not a runtime write — i.e. it is a GitOps change, covered by ADR-0005, not a Safe Action.
+5. **Conclusion (Proposed)**: Flink savepoint/stop are not part of any phase of this ADR. If a savepoint-only action is revisited, it must (a) be preceded by Beluga defining a savepoint directory in GitOps, (b) be restricted to `cancel-job=false`, and (c) pass the authentication prerequisite. Stop/cancel must not be exposed until the sync hook is changed to restore from a savepoint or the pipelines move under operator management. That is a Beluga repo change and is recorded here as a cross-repo dependency, not decided.
+
+Also out of scope (Class 3): Kubernetes Pod/Service restart (ArgoCD `selfHeal` reverts it: `docs/mistakes-log.md:49`), Kafka topic changes (Strimzi `KafkaTopic` CRs are the source — *not re-verified in this revision*), Iceberg table drop/purge.
+
+### 3. Preview/execute, replay and idempotency (Proposal)
 
 ```mermaid
 flowchart TD
-    User["Operator / Engineer UI"] -->|1. Preview Request| Preview["POST /api/v1/actions/preview"]
-    Preview --> AuthCheck["OPA / Keycloak Role Check\nOpenFGA Relation Check"]
-    AuthCheck -->|Allowed| Preflight["Adapter Pre-flight & Dry-run Check"]
-    Preflight --> TokenGen["Generate Preview Token\n(TTL: 5m, hash of params)"]
-    TokenGen --> User
-    User -->|2. Execute Request + Preview Token + IdempotencyKey| Exec["POST /api/v1/actions/execute"]
-    Exec --> TokenVal["Validate Preview Token & Nonce"]
-    TokenVal --> IdempCheck["Idempotency Cache Check (Redis / In-memory)"]
-    IdempCheck -->|New Request| AdapterExec["Adapter Executes Upstream API"]
-    AdapterExec --> AuditLog["Append to Immutable Audit Log\n(Actor, Action, Resource, Result)"]
-    AuditLog --> Response["Return Action Execution Record\n(HTTP 202 Accepted / 200 OK)"]
+    User["Operator UI"] -->|1. Preview| Preview["POST /api/v1/actions/preview"]
+    Preview --> Authn["Validate OIDC JWT (Phase 0)"]
+    Authn --> Authz["Per-action authorization"]
+    Authz -->|Allowed| Preflight["Read-only pre-flight"]
+    Preflight --> Token["Preview token (single-use nonce)"]
+    Token --> User
+    User -->|2. Execute + token + Idempotency-Key| Exec["POST /api/v1/actions/execute"]
+    Exec --> Reauth["Re-validate JWT + re-authorize"]
+    Reauth --> TokenVal["Verify token, consume nonce"]
+    TokenVal --> Idem["Idempotency record (persistent store)"]
+    Idem -->|New| Adapter["Adapter calls upstream"]
+    Adapter --> Audit["Audit entry (actor + service principal + result)"]
 ```
 
-1. **Authentication & Authorization Boundary**:
-   - The user's Keycloak JWT is extracted by the API gateway/Domain API.
-   - The user identity and roles (`admins`, `engineers`, `analysts`) are passed to OPA policy evaluation (`input.action`, `input.resource`, `input.user`).
-   - For catalog/data-related operations, OpenFGA is queried to ensure the user has the required relationship tuple (`user:alice`, `editor`, `table:lake.orders`).
-   - Role requirements: Class 1 requires `engineers` or `admins`; Class 2 requires `engineers` or `admins` with resource-specific ownership; `analysts` role is restricted to Class 0 (read-only).
-2. **Pre-flight & Dry-Run (Preview)**:
-   - Upstream API is queried in dry-run mode (or checked for resource existence, active locks, and healthy state).
-   - The preview response contains:
-     - `actionId`: Unique preview identifier.
-     - `summary`: Human-readable description of planned impact.
-     - `affectedResources`: Explicit list of resource URNs.
-     - `warnings`: Operational risks (e.g., "Stopping this Flink job will pause streaming ingestion into table 'lake.orders'").
-     - `previewToken`: Signed, time-bounded HMAC token (TTL: 300s) binding user ID, parameters, and action target.
-3. **Idempotency Protection**:
-   - `execute` requires the HTTP header `X-Idempotency-Key` (UUIDv4).
-   - If an execution request with the same idempotency key is received while processing or within the retention window (24 hours), the API returns the original execution result without re-invoking the upstream API.
-4. **Audit Trail Contract**:
-   - Every execution attempt (successful, failed, or unauthorized) generates an immutable structured audit log entry:
-     `{ timestamp, actor: { id, username, roles }, action: string, riskClass: string, targetResource: { kind, namespace, name }, parameters: object (redacted), result: "success" | "failure" | "denied", executionDurationMs: number, correlationId: string }`.
-   - Sensitive parameter values (passwords, tokens, PII) are strictly redacted prior to audit serialization.
+- **Preview token** (Proposed design): signed, bound to caller `sub`, action type, target and a hash of the parameters, with an expiry and a single-use nonce. Proposed lifetime: 5 minutes. The nonce is stored server-side so a token cannot be replayed after use.
+- **Idempotency**: `execute` requires an `Idempotency-Key` header. The (caller, key) pair is stored with the request hash and the result; the same key with different parameters is rejected; the same key with the same parameters returns the stored result without calling upstream. **Proposed retention: 24 hours** (single value; replaces the contradictory 24h/1h in the earlier draft). Storage: **Redis is not part of Beluga and is not assumed.** The domain API currently has no store (Current state); options are the CNPG `postgres-main` or an in-process store. An in-process store loses keys on restart and with more than one replica gives no guarantee, so it is only acceptable for single-replica development and must be labelled as such. See Open Question 3.
+- **Failure window**: if the Manager crashes after the upstream call but before persisting the result, a retry may call upstream again unless the upstream accepts a caller-chosen run id (*not verified* for Airflow 3). Record the idempotency entry as `in-progress` before the upstream call and treat an orphaned `in-progress` entry as "unknown — operator must check", never as safe to retry.
 
-### 4. API Shape Sketch (Clearly Labeled Design Proposal)
+### 4. Audit trail (Proposal) — what is and is not achievable
 
-> **Proposal Note**: The following schemas and routes represent the planned design contract and are not implemented in the current repository code.
+Every attempt (allowed, denied, failed) writes `{ timestamp, actor: { sub, username, roles }, servicePrincipal, action, riskClass, target, parameters (redacted), result, durationMs, correlationId }`. Secrets and PII are redacted before serialization; the redaction rules are not designed in this ADR.
+
+The earlier draft called the log "immutable" and "tamper-evident". That is **not** supported by the only mechanism proposed (an append-only database role). What each mechanism actually gives:
+
+| Mechanism | Protects against | Does not protect against |
+|---|---|---|
+| App DB role with `INSERT`/`SELECT` only (no `UPDATE`/`DELETE`) | Application bugs and a compromised Manager process rewriting history | A database superuser/owner, a CNPG admin, or anyone with Postgres access outside the app role |
+| Hash chain (each row stores a hash of the previous row) — Proposed | Undetected row edits/deletes by someone lacking the chain head | An actor who can rewrite the whole table and recompute the chain; truncation of the tail unless the head is anchored elsewhere |
+| Export to a separate system under a different trust domain (WORM bucket / separate log store) | Insider with DB access | Not designed; no such sink exists in Beluga today (*not verified*) |
+
+State of the claim: with the append-only role alone the log is **append-only for the application**, not immutable and not tamper-evident. A tamper-evidence claim requires the hash chain with an externally anchored head, and a tamper-proof claim requires a separate sink; both are open (Open Question 1).
+
+### 5. API shape sketch (Proposal; not implemented)
 
 ```typescript
-// Proposed Action Definition & Payload Schemas
 export interface ActionPreviewRequest {
-  actionType: "catalog.metadata.resync" | "airflow.dag.trigger" | "flink.job.savepoint" | "flink.job.graceful-stop";
-  targetResourceUrn: string; // e.g. "urn:beluga:service:streaming:flink-cluster"
+  actionType: "airflow.dag.trigger"; // Phase 2; other types are not defined by this ADR
+  targetResourceUrn: string;
   parameters?: Record<string, unknown>;
 }
-
 export interface ActionPreviewResponse {
   previewToken: string;
   expiresAt: string;
   actionType: string;
-  riskClass: "class-1" | "class-2" | "class-3";
+  riskClass: "class-1" | "class-2";
   targetResourceUrn: string;
   summary: string;
   affectedResources: Array<{ kind: string; name: string; namespace: string }>;
   warnings: string[];
   requiresExplicitConfirmation: boolean;
-  confirmationPhrase?: string; // For high-risk Class 2, require typing e.g. "STOP FLINK JOB"
 }
-
 export interface ActionExecuteRequest {
   previewToken: string;
-  idempotencyKey: string;
   parameters?: Record<string, unknown>;
   confirmationAcknowledged: boolean;
-}
-
+} // idempotency key is the Idempotency-Key header
 export interface ActionExecutionRecord {
   executionId: string;
   actionType: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "unknown";
   startedAt: string;
   completedAt?: string;
   targetResourceUrn: string;
   initiatedBy: string;
   error?: { code: string; message: string };
-  output?: Record<string, unknown>; // e.g. { savepointPath: "s3://..." }
+  output?: Record<string, unknown>;
 }
 ```
 
-Proposed HTTP Endpoints:
-- `POST /api/v1/actions/preview`: Validate preconditions and return an impact preview token.
-- `POST /api/v1/actions/execute`: Atomically execute an action using a preview token and idempotency key.
-- `GET /api/v1/actions/executions/{executionId}`: Query status of asynchronous operational tasks.
-- `GET /api/v1/actions/audit-log`: Query historical action execution records (filterable by actor, resource, date range).
+Proposed endpoints: `POST /api/v1/actions/preview`, `POST /api/v1/actions/execute`, `GET /api/v1/actions/executions/{executionId}`, `GET /api/v1/actions/audit-log` (restricted to authorized auditors).
 
 ## Consequences
 
 ### Positive
-- Enables essential day-to-day platform operations (DAG triggers, Flink savepoints) directly within Beluga Manager without granting engineers direct Kubernetes API or SSH access.
-- Eliminates operator errors through mandatory dry-run validation, blast-radius preview, and two-step confirmation modals.
-- Provides a centralized, tamper-evident audit record across heterogeneous OSS tools.
-- Preserves the read-first architecture: mutations are strictly isolated behind explicit action adapters and protected by two-phase execution.
+- Mutations cannot ship before real authentication/authorization exists.
+- Phase 1 delivers the framework with no mutation risk.
+- The Flink analysis prevents an action that ArgoCD would silently undo.
 
 ### Negative
-- Introduces stateful tracking (idempotency keys, preview token caching, and audit logs) into the Domain API tier.
-- Adapter complexity increases: each integrated service must maintain action-execution and pre-flight validation handlers in addition to existing read-only metadata extractors.
+- Adds stateful components (idempotency, nonce store, audit table) to a currently stateless API.
+- The most-requested operations (Flink stop) are deferred, pending Beluga repo changes.
+- Authentication work is a prerequisite larger than the action framework itself.
 
 ## Alternatives Considered
 
-1. **Kubernetes CRD / Job-based Action Runner**: Represent every action as a custom Kubernetes Job created on demand.
-   - *Why rejected*: Overhead of spawning Kubernetes Pods for lightweight operations (e.g. metadata refresh or REST call to Airflow) is high (5-15s latency); introduces excessive RBAC permissions (`create jobs`) to the Domain API ServiceAccount.
-2. **Client-side only confirmation (UI modal directly calling execute)**:
-   - *Why rejected*: Fails to validate server-side state at confirmation time; allows race conditions where resource state changes between user inspection and execution; provides no protection against malicious or automated direct API calls.
+1. **Kubernetes Job-per-action runner** — Rejected (Proposed judgement, not measured): extra RBAC (`create jobs`) for the Manager ServiceAccount and per-action pod startup overhead; latency not measured.
+2. **Client-side-only confirmation** — Rejected: no server-side state check at confirmation time and no protection against direct API calls.
 
 ## Risks and Mitigations
 
-| Risk | Impact | Mitigation Strategy |
+| Risk | Impact | Mitigation (Proposed) |
 |---|---|---|
-| Upstream timeout during Flink savepoint | Operation hangs; unclear whether savepoint was written. | Asynchronous execution pattern: adapter polls Flink REST API (`/jobs/{jobid}/savepoints/{triggerid}`); reports `pending` status; times out safely without retrying destructive calls. |
-| Duplicate execution caused by network retry | Accidental duplicate DAG runs or duplicate jobs. | Mandatory `X-Idempotency-Key` validated in Domain API memory/cache before invoking upstream adapters. |
-| Token forgery or replay attacks | Unauthorized execution of expired preview tokens. | Preview tokens are signed HMAC payloads containing timestamp, user identity, parameter hash, and a 5-minute expiry. |
-| Privilege escalation via action parameters | Operator injects arbitrary code into DAG parameters. | Strict JSON schema validation per action type; parameter allowlisting before forwarding to upstream APIs. |
+| Mutating route reachable without auth | Anyone reaching the API can trigger actions | Hard prerequisite (section 0): fail closed when auth is not configured |
+| Confused deputy via shared service credential | Caller obtains effects they are not authorized for | Section 0 item 4 |
+| Replay of a captured preview token | Duplicate or unauthorized execution | Single-use nonce, caller binding, short expiry |
+| Duplicate execution on retry | Duplicate DAG runs | Idempotency record with `in-progress` state; unknown-state handling |
+| Audit rewrite by DB admin | False sense of integrity | State the limits (section 4); anchoring is open |
+| Action undone by GitOps | Silent no-op or resubmission | Flink actions not scheduled (section 2a) |
 
 ## Open Owner Questions
 
-1. **Audit Storage Destination**: Should the audit log be stored in a dedicated PostgreSQL table in the existing meta-database (`cnpg-main`), or projected to Kubernetes Events and Prometheus/Loki?
-   - *Recommendation*: Store audit records in a dedicated table in PostgreSQL (`beluga_manager_audit`) with append-only access, and simultaneously emit a high-severity Domain `Event` (`source: "service"`) to allow real-time visibility on the Operations timeline.
-2. **Approval Workflow (Two-Person / 4-Eyes Principle)**: Should Class 2 actions (such as Flink job stop) require dual authorization (two different operators) in production environments?
-   - *Recommendation*: Phase 1 implements single-operator execution with mandatory confirmation modal and typed acknowledgment phrase. Dual authorization should be deferred to Phase 2 for enterprise profiles.
-3. **Idempotency Store Persistence**: How should idempotency keys be retained across Domain API container restarts?
-   - *Recommendation*: In-memory LRU cache with 1-hour TTL is sufficient for MVP local/dev; production deployment should back idempotency keys with PostgreSQL or Redis.
+1. **Audit storage and tamper resistance**: where do audit records live and how strong a claim is required?
+   - *Recommendation*: a dedicated table in CNPG `postgres-main` (ns `database`) written by an `INSERT`-only role, plus a hash chain; describe it as "append-only for the application, tamper-evident only if the chain head is anchored externally". Do not use the word "immutable" until an external WORM sink is chosen.
+2. **Authorization engine for per-action decisions** (OPA vs OpenFGA vs in-process roles, and the claim that carries roles).
+   - *Recommendation*: start with an in-process allow-list keyed on Keycloak roles for the single Phase 2 action; adopt OPA only when more than one action class exists. Role/claim names must be read from the live realm first (not verified).
+3. **Idempotency/nonce persistence**.
+   - *Recommendation*: CNPG `postgres-main` (already deployed); do not introduce Redis. Allow in-process storage only for single-replica development.
+4. **Four-eyes approval** for Class 2.
+   - *Recommendation*: not needed while only the Class 1 DAG trigger exists; revisit when a Class 2 action is proposed.
+5. **Airflow 3 service-to-service access** (base path, auth under FAB, caller-chosen run id).
+   - *Recommendation*: a spike against the live Airflow 3.3.0 instance and the official Airflow REST reference before Phase 2; until then treat all of it as not verified.
+6. **Flink**: define a savepoint directory and make the submit hook restore-aware in the Beluga repo, or move pipelines under operator management?
+   - *Recommendation*: raise as a Beluga issue; keep Flink actions out of Safe Actions until resolved.
 
 ## Follow-up Implementation Tasks & Acceptance Test Ideas
 
-1. **Task 1: Safe Action Domain Schemas and Validation Logic**
-   - Implement Zod OpenAPI schemas for `ActionPreviewRequest`, `ActionPreviewResponse`, `ActionExecuteRequest`, and `ActionExecutionRecord`.
-   - *Acceptance test*: Route unit tests verifying 400 Bad Request on missing `idempotencyKey` or malformed parameter payloads.
-2. **Task 2: Action Registry and Preview Token Lifecycle**
-   - Implement `ActionRegistry` with HMAC token signing, parameter hashing, and expiration checks.
-   - *Acceptance test*: Expired tokens (>5 minutes) or tampered parameter payloads are rejected with 403 Forbidden.
-3. **Task 3: Airflow DAG Trigger Adapter**
-   - Implement Airflow action adapter calling `POST /api/v1/dags/{dag_id}/dagRuns` with deterministic run ID derivation.
-   - *Acceptance test*: Mock adapter test proving that duplicate calls with identical idempotency keys do not generate multiple upstream POST requests.
-4. **Task 4: Flink Savepoint and Graceful Stop Adapter**
-   - Implement Flink action adapter triggering savepoints via Flink REST API / Kubernetes Operator.
-   - *Acceptance test*: Simulating a 504 gateway timeout returns a `pending` status record rather than failing closed or double-submitting.
-5. **Task 5: Frontend Confirmation Modal Component**
-   - Create reusable `SafeActionConfirmModal` in `packages/web` displaying impact preview, warning badges, and confirmation input.
-   - *Acceptance test*: Vitest component test verifying keyboard accessibility, Enter-key prevention, and button disablement until acknowledgment criteria are met.
+1. **Authentication middleware (Phase 0)**: OIDC JWT validation on `/api/*` mutating routes. *Acceptance*: missing/expired/wrong-audience/`alg=none` tokens give 401; valid token with insufficient role gives 403; unconfigured auth makes every mutating route fail closed.
+2. **Action schemas** (Zod/OpenAPI) and preview endpoint without any execute adapter. *Acceptance*: 400 on malformed parameters; no outbound upstream write is possible in Phase 1 (test asserts the adapter registry has no execute handler).
+3. **Preview token and nonce store**. *Acceptance*: tampered parameters, expired token, other caller's token and a reused token are all rejected.
+4. **Audit table with INSERT-only role and hash chain**. *Acceptance*: app role cannot `UPDATE`/`DELETE`; chain verification detects a modified row.
+5. **Airflow adapter (Phase 2)** — only after Open Question 5 is answered. *Acceptance*: duplicate `Idempotency-Key` produces one upstream POST; crash between upstream call and persistence yields `unknown`, not a silent retry.
+6. **`SafeActionConfirmModal`** in `packages/web`. *Acceptance*: keyboard accessible; execute disabled until acknowledgment.
