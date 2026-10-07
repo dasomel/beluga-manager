@@ -76,8 +76,9 @@ This file records behavior implemented on the default branch and separates it fr
   fixture assets and a stub service registry. `childCount` remains `null` until node-level OPA filtering
   exists; ADR-0004 treats that filtering as a gate for rollout to real users. Superset dataset context
   is optional in issue #36.
-- The frontend has no data grid, DAG/topology graph, or SQL editor component yet (issues #16-#18);
-  current views are Tailwind-styled shells, not the specialist components ADR-0003 selected.
+- Specialist accessible node-edge topology graph component (`TopologyGraph`, issues #16 and #18): implemented using `@xyflow/react` per ADR-0003 with keyboard navigation between nodes (Tab/arrow keys, Enter/Space), visible focus indicators, dual theme support, status badges with text labels (WCAG non-color signaling), automatic DAG layout for unpositioned nodes, accessible table alternative for screen readers, and empty/loading/error states. Integrated into PipelinesView for pipeline correlation graphs and ArchitectureView for pipeline stages and Kubernetes infrastructure topology. Verified by unit and render tests only; not verified in a browser. Data grid (#16) and SQL editor (#17) components remain pending.
+- The frontend has no data grid or SQL editor component yet (issues #16-#17);
+  those views remain Tailwind-styled shells, not the specialist components ADR-0003 selected.
 - Architecture (topology) navigation section (issue #18) does not exist yet — see
   `docs/architecture.md`'s Navigation section. Operations drill-down (issue #19) covers
   service/pipeline references, Kubernetes resource list (kinds Namespace/Workload/Pod/Service/

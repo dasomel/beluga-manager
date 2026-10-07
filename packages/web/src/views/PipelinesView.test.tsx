@@ -149,6 +149,15 @@ describe('PipelinesView', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 
+  it('renders the pipeline correlation graph with specialist graph component', () => {
+    const html = renderToStaticMarkup(<PipelinesView t={tEn} />);
+    expect(html).toContain(tEn.pipelines.correlationGraphTitle);
+    expect(html).toContain(tEn.graph.graphView);
+    expect(html).toContain(tEn.graph.tableView);
+    expect(html).toContain('t1');
+    expect(html).toContain('j1');
+  });
+
   it('shows an empty correlation-links message in Korean for pipelines without links', () => {
     const html = renderToStaticMarkup(<PipelinesView t={tKo} initialPipelineId="pl-batch-reporting" />);
     expect(html).toContain(tKo.pipelines.noCorrelationLinks);

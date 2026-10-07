@@ -76,8 +76,8 @@ Last verified for issues #17/#23/#35/#36: 2026-10-05 against default branch comm
   Query Workspace의 별도 query-context route도 아직 fixture 자산과 stub service registry를 씁니다.
   `childCount`는 node-level OPA filtering 전까지 `null`이며 ADR-0004는 실제 사용자 rollout 전에
   해당 filtering을 요구합니다. Superset dataset context는 이슈 #36에서 선택 사항입니다.
-- 프론트엔드에 데이터 그리드, DAG/토폴로지 그래프, SQL 에디터 컴포넌트가 아직 없습니다(이슈
-  #16-#18) — 현재 뷰는 ADR-0003이 선정한 전문 컴포넌트가 아니라 Tailwind로만 스타일링된 shell입니다.
+- 접근성을 갖춘 전문 노드-엣지 토폴로지 그래프 컴포넌트(`TopologyGraph`, 이슈 #16 및 #18): ADR-0003에 따라 `@xyflow/react`를 활용해 구현되었으며, 노드 간 키보드 탐색(Tab/화살표 키, Enter/스페이스바), 가시적 포커스 링, 다크/라이트 테마 지원, 텍스트 상태 라벨이 병기된 뱃지(WCAG 색상 단독 신호 방지), 미배치 노드를 위한 자동 DAG 레이아웃, 스크린 리더를 위한 표 대체 뷰, 빈 상태/로딩/오류 상태를 지원합니다. PipelinesView의 파이프라인 상관관계 그래프 및 ArchitectureView의 파이프라인 단계 및 Kubernetes 인프라 토폴로지에 연동되었습니다. 단위 및 렌더 테스트로만 검증되었으며 실제 브라우저에서는 확인하지 않았습니다. 데이터 그리드(#16) 및 SQL 에디터(#17) 컴포넌트는 아직 대기 중입니다.
+- 프론트엔드에 데이터 그리드나 SQL 에디터 컴포넌트가 아직 없습니다(이슈 #16-#17) — 해당 뷰는 ADR-0003이 선정한 전문 컴포넌트가 아니라 Tailwind로만 스타일링된 shell입니다.
 - Architecture(토폴로지) 내비게이션 섹션(이슈 #18)이 아직 없습니다 — `docs/architecture.md`의
   내비게이션 섹션 참고. Operations drill-down(이슈 #19)은 service/pipeline 참조, Kubernetes 리소스
   목록(Namespace/Workload/Pod/Service/Endpoint/Job/PersistentVolumeClaim 종류와 종류 필터, PVC 선택
