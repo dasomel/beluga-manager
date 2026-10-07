@@ -248,6 +248,13 @@ test("설정 검증: 기본값, 경로/자격증명/스킴/타임아웃 오류�
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_TIMEOUT_MS: "0" })).toThrow(/TIMEOUT/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_TIMEOUT_MS: "abc" })).toThrow(/TIMEOUT/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_CACHE_TTL_MS: "-1" })).toThrow(/CACHE_TTL/);
+  // 캐시 비활성(TTL < 1000)은 명시적 opt-in이 있어야만 허용된다.
+  const url = { BELUGA_FLINK_REST_URL: "http://x:8081" };
+  expect(bad({ ...url, BELUGA_FLINK_CACHE_TTL_MS: "0" })).toThrow(/between 1000 and/);
+  expect(bad({ ...url, BELUGA_FLINK_CACHE_TTL_MS: "999" })).toThrow(/CACHE_TTL/);
+  expect(bad({ ...url, BELUGA_FLINK_CACHE_TTL_MS: "0", BELUGA_FLINK_ALLOW_NO_CACHE: "yes" })).toThrow(/CACHE_TTL/);
+  expect(loadFlinkAdapterConfig({ ...url, BELUGA_FLINK_CACHE_TTL_MS: "1000" })?.cacheTtlMs).toBe(1000);
+  expect(loadFlinkAdapterConfig({ ...url, BELUGA_FLINK_CACHE_TTL_MS: "0", BELUGA_FLINK_ALLOW_NO_CACHE: "true" })?.cacheTtlMs).toBe(0);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_SNAPSHOT_BUDGET_MS: "0" })).toThrow(/SNAPSHOT_BUDGET/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_MAX_CONCURRENCY: "99" })).toThrow(/MAX_CONCURRENCY/);
   expect(bad({ BELUGA_FLINK_REST_URL: "http://x:8081", BELUGA_FLINK_MAX_QUEUE: "2000" })).toThrow(/MAX_QUEUE/);

@@ -32,6 +32,7 @@ const MAX_TIMEOUT_MS = 30_000;
 // D3: 인증 없는 Domain API가 JobManager 부하 증폭기가 되지 않도록 snapshot을 5s 캐시·합치고(단일 비행),
 // 구성 예산 5s, 전역 동시 요청 8로 제한한다. 값은 설정으로 조정할 수 있다.
 export const DEFAULT_FLINK_CACHE_TTL_MS = 5000;
+export const MIN_CACHE_TTL_MS = 1000;
 export const DEFAULT_FLINK_SNAPSHOT_BUDGET_MS = 5000;
 export const DEFAULT_FLINK_MAX_CONCURRENCY = 8;
 export const DEFAULT_FLINK_MAX_QUEUE = 64;
@@ -58,7 +59,10 @@ export function loadFlinkAdapterConfig(env: Record<string, string | undefined>):
   }
 
   const timeoutMs = intEnv(env, "BELUGA_FLINK_TIMEOUT_MS", DEFAULT_FLINK_TIMEOUT_MS, 1, MAX_TIMEOUT_MS);
-  const cacheTtlMs = intEnv(env, "BELUGA_FLINK_CACHE_TTL_MS", DEFAULT_FLINK_CACHE_TTL_MS, 0, 60_000);
+  // D3b: TTL 0은 캐시를 끄므로 인증 없는 호출자가 동시성 상한까지 JobManager를 몰아칠 수 있다.
+  // 명시적 BELUGA_FLINK_ALLOW_NO_CACHE=true 없이는 하한(1000ms) 미만을 거부한다.
+  const allowNoCache = env["BELUGA_FLINK_ALLOW_NO_CACHE"]?.trim() === "true";
+  const cacheTtlMs = intEnv(env, "BELUGA_FLINK_CACHE_TTL_MS", DEFAULT_FLINK_CACHE_TTL_MS, allowNoCache ? 0 : MIN_CACHE_TTL_MS, 60_000);
   const snapshotBudgetMs = intEnv(env, "BELUGA_FLINK_SNAPSHOT_BUDGET_MS", DEFAULT_FLINK_SNAPSHOT_BUDGET_MS, 1, 60_000);
   const maxQueue = intEnv(env, "BELUGA_FLINK_MAX_QUEUE", DEFAULT_FLINK_MAX_QUEUE, 0, 1024);
   const maxConcurrency = intEnv(env, "BELUGA_FLINK_MAX_CONCURRENCY", DEFAULT_FLINK_MAX_CONCURRENCY, 1, 32);

@@ -55,7 +55,8 @@ By default the Domain API serves stub fixtures and makes no upstream calls. Sett
 |---|---|---|
 | `BELUGA_FLINK_REST_URL` | unset (adapter disabled) | Flink JobManager REST origin, e.g. `http://flink-cluster-rest.streaming:8081`. Must be `http`/`https`, no path, no embedded credentials. |
 | `BELUGA_FLINK_TIMEOUT_MS` | `2000` | Per-request deadline, integer 1-30000. It starts when the request is issued, so time spent waiting for a concurrency slot counts against it. |
-| `BELUGA_FLINK_CACHE_TTL_MS` | `5000` | How long a complete pipeline snapshot (and the `/overview` result) is reused, integer 0-60000; `0` disables reuse (concurrent calls are still coalesced). |
+| `BELUGA_FLINK_CACHE_TTL_MS` | `5000` | How long a complete pipeline snapshot (and the `/overview` result) is reused, integer 1000-60000 (default 5000). Values below 1000, including `0` (no reuse), are rejected at startup unless `BELUGA_FLINK_ALLOW_NO_CACHE=true` is also set. Warning: with no cache and no API authentication, any caller can drive the JobManager at the concurrency cap (measured about 3000 upstream calls/s with a fake upstream); leave the TTL above 0. Concurrent calls are still coalesced. |
+| `BELUGA_FLINK_ALLOW_NO_CACHE` | unset | Set to exactly `true` to permit `BELUGA_FLINK_CACHE_TTL_MS` below 1000. Not recommended. |
 | `BELUGA_FLINK_SNAPSHOT_BUDGET_MS` | `5000` | Total time budget to build one snapshot, integer 1-60000. When exceeded, pending requests are aborted and the jobs read so far are returned with a `PARTIAL` warning (or `UPSTREAM_UNAVAILABLE` if even `/jobs/overview` did not arrive). |
 | `BELUGA_FLINK_MAX_CONCURRENCY` | `8` | Global cap on in-flight JobManager requests across all routes, integer 1-32. |
 | `BELUGA_FLINK_MAX_QUEUE` | `64` | Maximum number of requests waiting for a concurrency slot, integer 0-1024. When full, further requests are rejected immediately (service health `unknown`; list/by-id report `UPSTREAM_UNAVAILABLE` / 503). |

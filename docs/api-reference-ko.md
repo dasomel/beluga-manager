@@ -55,7 +55,8 @@ Domain API는 엔드포인트를 `/api/v1` 아래 9개의 리소스 그룹으로
 |---|---|---|
 | `BELUGA_FLINK_REST_URL` | 미설정(adapter 비활성) | Flink JobManager REST origin (예: `http://flink-cluster-rest.streaming:8081`). `http`/`https`여야 하며 경로와 내장 자격증명은 허용되지 않습니다. |
 | `BELUGA_FLINK_TIMEOUT_MS` | `2000` | 요청별 deadline, 1~30000 사이 정수. 요청을 낸 시점부터 시작하므로 동시성 슬롯 대기 시간도 포함됩니다. |
-| `BELUGA_FLINK_CACHE_TTL_MS` | `5000` | 완전한 pipeline snapshot(및 `/overview` 결과)을 재사용하는 시간, 0~60000 정수. `0`이면 재사용하지 않습니다(동시 호출 합치기는 유지). |
+| `BELUGA_FLINK_CACHE_TTL_MS` | `5000` | 완전한 pipeline snapshot(및 `/overview` 결과)을 재사용하는 시간, 1000~60000 정수(기본 5000). `0`(재사용 없음)을 포함해 1000 미만 값은 `BELUGA_FLINK_ALLOW_NO_CACHE=true`를 함께 설정하지 않으면 기동 시 거부됩니다. 경고: 캐시가 없고 API에 인증이 없으면 누구나 동시성 상한까지 JobManager를 몰아칠 수 있습니다(fake upstream 기준 초당 약 3000회 측정). TTL은 0보다 크게 유지하세요. 동시 호출 합치기는 유지됩니다. |
+| `BELUGA_FLINK_ALLOW_NO_CACHE` | 미설정 | 정확히 `true`로 설정하면 `BELUGA_FLINK_CACHE_TTL_MS`를 1000 미만으로 허용합니다. 권장하지 않습니다. |
 | `BELUGA_FLINK_SNAPSHOT_BUDGET_MS` | `5000` | snapshot 1회를 구성하는 전체 시간 예산, 1~60000 정수. 초과하면 대기 중 요청을 abort하고 그때까지 읽은 job을 `PARTIAL` 경고와 함께 반환합니다(`/jobs/overview`조차 못 받으면 `UPSTREAM_UNAVAILABLE`). |
 | `BELUGA_FLINK_MAX_CONCURRENCY` | `8` | 모든 route를 합친 JobManager 진행 중 요청의 전역 상한, 1~32 정수. |
 | `BELUGA_FLINK_MAX_QUEUE` | `64` | 동시성 슬롯을 기다리는 요청의 최대 개수, 0~1024 정수. 가득 차면 이후 요청은 즉시 거부됩니다(서비스 health `unknown`, 목록/단건은 `UPSTREAM_UNAVAILABLE` / 503). |
