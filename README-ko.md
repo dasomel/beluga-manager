@@ -1,5 +1,8 @@
 English | [한국어](README-ko.md) · [Architecture / 아키텍처](docs/architecture-ko.md) · [API Reference / API 레퍼런스](docs/api-reference-ko.md) · [Troubleshooting / 트러블슈팅](docs/troubleshooting-ko.md)
 
+> [!IMPORTANT]
+> **이 저장소는 아카이브되었습니다(2026-10-15).** Beluga Manager는 이제 [`dasomel/beluga`의 `manager/`](https://github.com/dasomel/beluga/tree/main/manager)에서 전체 이력과 함께 관리됩니다([ADR-0005](https://github.com/dasomel/beluga/blob/main/docs/adr/0005-consolidate-beluga-manager-into-monorepo-ko.md)). 열린 이슈는 dasomel/beluga #239–#260으로 이전했습니다([매핑](https://github.com/dasomel/beluga/issues/239#issuecomment-6186301298)). import 이후 커밋 SHA가 달라졌으며, 이 저장소에 인용된 SHA는 여기서 조회됩니다.
+
 # Beluga Manager
 
 > Beluga Data Platform을 위한 통합 Control Plane

@@ -1,5 +1,8 @@
 English | [한국어](README-ko.md) · [Architecture](docs/architecture.md) · [API Reference](docs/api-reference.md) · [Troubleshooting](docs/troubleshooting.md)
 
+> [!IMPORTANT]
+> **This repository is archived (2026-10-15).** Beluga Manager now lives in [`dasomel/beluga` under `manager/`](https://github.com/dasomel/beluga/tree/main/manager), with full history ([ADR-0005](https://github.com/dasomel/beluga/blob/main/docs/adr/0005-consolidate-beluga-manager-into-monorepo.md)). Open issues were transferred to dasomel/beluga #239–#260 ([mapping](https://github.com/dasomel/beluga/issues/239#issuecomment-6186301298)). Commit SHAs differ after the import; SHAs quoted in this repo resolve here.
+
 # Beluga Manager
 
 > **Unified Control Plane for the Beluga Data Platform**
